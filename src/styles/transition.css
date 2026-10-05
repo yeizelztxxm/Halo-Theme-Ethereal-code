@@ -1,0 +1,221 @@
+@reference "./global.css";
+
+html.is-changing .transition-swup-fade {
+  transition-property: all;
+  transition-duration: var(--dur-swup, 200ms);
+  transition-timing-function: var(
+    --default-transition-timing-function,
+    cubic-bezier(0.4, 0, 0.2, 1)
+  );
+}
+
+html.is-animating .transition-swup-fade {
+  @apply translate-y-4 opacity-0;
+}
+
+/* 右侧边栏：作为 swup 容器以更新 TOC，但完全禁用过渡动画。
+   swup-visited：首次换页（visit:start）起永久挂在 <html> 上——换页换入的新
+   aside 虽带静态 onload-animation 类（首刷消闪烁所需），此规则令其动画永不
+   重播且保持可见（覆盖 .onload-animation 的 opacity:0），恢复"仅首刷播一次"。 */
+html.is-changing #right-sidebar,
+html.is-animating #right-sidebar,
+html.swup-visited #right-sidebar {
+  transition: none !important;
+  animation: none !important;
+  opacity: 1 !important;
+  transform: none !important;
+  translate: none !important;
+}
+
+/* 追番页筛选（Swup 同页换入）：番剧网格/卡片/分页的 onload-animation 仅首刷播放，
+   Swup 换页（点筛选 tab）不重播——避免每次切换都重放错峰进场动画（"过度动画"）。
+   复用 #right-sidebar 同源机制：html.swup-visited 自首次换页起永久挂在 <html>，
+   此处据此永久抑制追番页容器内入场动画、强制终态可见（覆盖 .onload-animation
+   的 opacity:0），与主题其他 Swup 过渡保持一致观感。 */
+html.swup-visited .bangumi-page .onload-animation {
+  animation: none !important;
+  opacity: 1 !important;
+  transform: none !important;
+  translate: none !important;
+}
+
+@keyframes fade-in-up {
+  0% {
+    translate: 0 2rem;
+    opacity: 0;
+  }
+
+  100% {
+    translate: 0 0;
+    opacity: 1;
+  }
+}
+
+.onload-animation {
+  opacity: 0;
+  animation: var(--dur-entry, 300ms) fade-in-up;
+  animation-fill-mode: forwards;
+}
+
+#navbar {
+  animation-delay: 0ms;
+}
+
+/* 首页 banner 标题/副标题：随 banner 图同刻渐显。
+   原各自 300ms fade-in-up（50/130ms 延迟）会抢跑于 banner 图 700ms 渐显——
+   图片尚黑时标题已浮现（与 #home-moments / #category-bar 同类闪烁，见 1.3.33）。
+   改为静态 opacity:0，待 .banner-reveal 图片 onload 移除 opacity-0（showBanner，
+   或 Layout 1.5s 兜底 revealBanner）后，用 --dur-banner 过渡与图片同一节奏淡入；
+   副标题再错峰 120ms。疾速档 opacity:1 覆盖 + slide-in-up 不受影响。 */
+#banner-title,
+#banner-subtitle-wrapper {
+  opacity: 0;
+  transition: opacity var(--dur-banner, 700ms) ease;
+}
+
+.banner-reveal:not(.opacity-0) ~ #banner-overlay #banner-title {
+  opacity: 1;
+}
+
+.banner-reveal:not(.opacity-0) ~ #banner-overlay #banner-subtitle-wrapper {
+  opacity: 1;
+  transition-delay: 120ms;
+}
+
+#sidebar,
+#right-sidebar {
+  animation-delay: min(100ms, var(--dur-entry-max, 400ms));
+}
+
+#swup-container {
+  outline: none;
+}
+
+/* Swup 换页的焦点落点 = 页面主标题（选择器见 app.ts setupSwup 的 visit.a11y.focus）。
+   它是**程序化聚焦**，键盘用户需要看见落点，但不该用浏览器默认的 outline:auto：
+   h1 是 block w-full，默认环是整行大矩形，且与主题其它焦点环语言不一致。
+   统一成主题焦点环色（--focus-ring：浅色下已压深到达 WCAG 2.4.11 的 3:1）。
+   ⚠️ outline-offset 取 4px 而非 .tag-chip 的 2px —— 大字号标题贴太紧会顶到字形；
+      h1 自带的 ::before 主色竖条在元素盒之外，不会被这个环包住，属预期。 */
+#swup-container h1:focus-visible,
+#banner-title:focus-visible {
+  outline: 0.125rem solid var(--focus-ring);
+  outline-offset: 0.25rem;
+  border-radius: 0.375rem;
+}
+
+#content-wrapper {
+  animation-delay: min(var(--content-delay), var(--dur-entry-max, 400ms));
+}
+
+/* 首页分类导航栏：视觉上位于内容卡片上方（内容列第一项），延迟对齐内容区
+   与内容卡片一起入场，避免刷新瞬间抢跑可见（同 #home-moments 修复）；
+   疾速档 --dur-entry-max:0 → 错峰清零立即入场 */
+#category-bar {
+  animation-delay: min(var(--content-delay), var(--dur-entry-max, 400ms));
+}
+
+/* 首页瞬间栏：视觉上位于内容卡片下方，延迟对齐「内容区 + 100ms」，避免刷新瞬间
+   抢跑可见（先于 banner/内容卡片完成入场）；疾速档 --dur-entry-max:0 → 错峰清零立即入场 */
+#home-moments {
+  animation-delay: min(
+    calc(var(--content-delay) + 100ms),
+    var(--dur-entry-max, 400ms)
+  );
+}
+
+.footer {
+  animation-delay: min(250ms, var(--dur-entry-max, 400ms));
+}
+
+#banner-credit {
+  animation-delay: min(400ms, var(--dur-entry-max, 400ms));
+}
+
+#post-container :nth-child(1) {
+  animation-delay: min(
+    calc(var(--content-delay) + 0ms),
+    var(--dur-entry-max, 400ms)
+  );
+}
+
+#post-container :nth-child(2) {
+  animation-delay: min(
+    calc(var(--content-delay) + 50ms),
+    var(--dur-entry-max, 400ms)
+  );
+}
+
+#post-container :nth-child(3) {
+  animation-delay: min(
+    calc(var(--content-delay) + 100ms),
+    var(--dur-entry-max, 400ms)
+  );
+}
+
+#post-container :nth-child(4) {
+  animation-delay: min(
+    calc(var(--content-delay) + 175ms),
+    var(--dur-entry-max, 400ms)
+  );
+}
+
+#post-container :nth-child(5) {
+  animation-delay: min(
+    calc(var(--content-delay) + 250ms),
+    var(--dur-entry-max, 400ms)
+  );
+}
+
+/* —— 疾速档（data-speed="snappy"）——
+   内容立即可读、完全静止显示：opacity 恒为 1（关闭透明门控），入场位移归零——
+   原 8px 位移在「拉到底部刷新」时会让底部视口内的元素（footer/卡片）做一次
+   8px 跳动，被感知为「刷新瞬间看到其他东西」。错峰延迟已由上方
+   min(--dur-entry-max) 归零。保留 slide-in-up 动画结构（位移 0 的 no-op 动画）
+   仅为触发 animationend → removeOnloadAnimation 移除 .onload-animation 类，
+   避免切档位时残留类重播 fade-in-up。
+   注：banner-title/subtitle 不纳入此组——它们由 v1.3.33 重构改为跟随
+   .banner-reveal（图加载完成）触发，snappy 强制 opacity:1 会让文字抢跑于
+   banner 图（刷新瞬间文字悬浮空 banner 上），仅靠默认 banner-reveal 触发
+   + --dur-banner 过渡与图片同步渐显（350ms snappy）即可。 */
+@keyframes slide-in-up {
+  from {
+    translate: 0 0;
+  }
+
+  to {
+    translate: 0 0;
+  }
+}
+
+html[data-speed="snappy"] .onload-animation {
+  opacity: 1;
+  animation-name: slide-in-up;
+  animation-duration: var(--dur-entry, 120ms);
+  animation-timing-function: ease-out;
+  animation-fill-mode: forwards;
+}
+
+/* 文章正文区域：去除 opacity fade-in，避免深色代码块在亮色页面
+   fade-in 时出现"黑闪"——dark bg (--codeblock-bg = oklch(0.17)) 从
+   opacity 0 渐显到 1，与亮色卡片背景形成强烈对比，视觉上像一闪而过。
+   正文直接可见即可，无需渐进（slide-in-up 在本主题里是 0→0 no-op，
+   配合 opacity:1 等价于"立即出现"）。只对含 .custom-md 的 #content-wrapper
+   生效（文章页），首页/归档页等不受影响。 */
+#content-wrapper:has(.custom-md) {
+  opacity: 1;
+  animation-name: slide-in-up;
+}
+.custom-md.onload-animation {
+  opacity: 1;
+  animation-name: slide-in-up;
+}
+
+/* —— 首页↔其他页换页（home-switch，is-home 变化时由 app.ts 挂载）——
+   换入瞬间横幅/网格/波浪 700ms 平滑上升/下沉，两侧组件随网格一起滑动；
+   主内容淡入与位移同速（--dur-banner），完全显示时位移恰好结束，
+   消除"内容先显示、再位移"的闪烁。is-rendering 仅换入阶段存在
+   （content:replace 加入、visit:end 清除），故退场淡出仍保持 --dur-swup 不变。 */
+html.home-switch.is-rendering .transition-swup-fade {
+  transition-duration: var(--dur-banner, 700ms);
+}

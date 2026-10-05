@@ -1,0 +1,1751 @@
+@reference "./global.css";
+
+@layer components {
+  .card-base {
+    @apply overflow-hidden rounded-(--radius-large) bg-(--card-bg) transition;
+    /* 背景纹理改为由 :root.mods-card-pattern 作用域控制（见下方 .float-panel 后规则）；
+       关闭魔改时回到上游无纹理原版 */
+    will-change: transform;
+  }
+
+  .expand-animation {
+    @apply relative z-0 before:absolute before:inset-0 before:-z-10 before:scale-[0.85] before:rounded-[inherit] before:transition before:ease-out hover:before:scale-100 hover:before:bg-(--btn-plain-bg-hover) active:bg-transparent active:before:bg-(--btn-plain-bg-active);
+  }
+
+  .link {
+    @apply relative z-0 -m-1 rounded-md p-1 transition before:absolute before:inset-0 before:-z-10 before:scale-[0.85] before:rounded-[inherit] before:transition before:ease-out hover:before:scale-100 hover:before:bg-(--btn-plain-bg-hover) active:bg-transparent active:before:bg-(--btn-plain-bg-active);
+  }
+
+  .link-lg {
+    @apply relative z-0 -m-1.5 rounded-md p-1.5 transition before:absolute before:inset-0 before:-z-10 before:scale-[0.85] before:rounded-[inherit] before:transition before:ease-out hover:before:scale-100 hover:before:bg-(--btn-plain-bg-hover) active:bg-transparent active:before:bg-(--btn-plain-bg-active);
+  }
+
+  .float-panel {
+    @apply top-[4.875rem] overflow-hidden rounded-(--radius-large) bg-(--card-bg) shadow-xl transition;
+    /* 同 .card-base：isolation 建立 stacking context，供 ::before 纹理负 z 定位。
+       position 由使用处提供（NavMenuPanel 为 fixed，已定位），此处不再重复设 relative。 */
+    isolation: isolate;
+    will-change: transform, opacity;
+  }
+
+  /* 魔改：卡片背景纹理（仅 <html class="mods-card-pattern"> 时生效；
+     关闭魔改 → 无纹理，回到上游原版）。
+     仅电脑端（>=768px）应用：
+       - 媒体查询不命中时浏览器根本不会请求其中的 url()，手机端零下载零解码
+       - 取代原 1.2.78 之前的「先无条件加载 PNG、再在 max-width:767px 隐藏」——
+         旧方案让手机端白下 653KB 然后把它藏起来
+
+     1.3.89 起改为 ::before 伪元素 + --card-pattern-opacity（淡化程度可调）：
+       - 纹理不再直接铺 background-image（无法单独控制透明度），改用伪元素承载：
+         伪元素 background-color=--card-bg 与卡片同底色、background-image=pattern.svg、
+         background-blend-mode 混合出纹理，再用 opacity 整体淡化。
+       - 淡化程度 = var(--card-pattern-opacity)（由后台「魔改开关 → 卡片纹理 → 淡化程度」
+         滑块注入到 body 的 th:style），默认 0.03。
+       - pattern.svg 白墨 fill-opacity 固定为 1（全浓基准），淡化完全交给伪元素 opacity。
+     双模式（贴合主题观感）：
+       - 亮色走 difference：白墨反成深墨，Δ ≈ -7 → 亮色卡片呈若隐若现的水印
+       - :root.dark 单独走 screen：白墨在深底上柔和提亮，Δ ≈ +6 → 暗色卡片与亮色等权重
+       - 尺寸 200px 与旧 1.2.80 一致 */
+  @media (min-width: 768px) {
+    :root.mods-card-pattern .card-base::before,
+    :root.mods-card-pattern .float-panel::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      /* 负 z 落在卡片背景之上、内容（文字/标签）之下，不遮内容不被背景盖住；
+         依赖 .card-base/.float-panel 的 isolation:isolate 建立的 stacking context */
+      z-index: -1;
+      background-color: var(--card-bg);
+      background-image: url(/themes/Ethereal/assets/images/pattern.svg);
+      /* 锚定左上角而非 50%：background-position 百分比是相对元素自身 box 的定位，
+         卡片高度随内容变化（手风琴 collapse / tab 展开）时 50% 锚点会移动，
+         导致平铺纹理整体漂移、视觉「跳一下」。固定 0 0 后平铺相位不再随尺寸变化。 */
+      background-position: 0 0;
+      background-repeat: repeat;
+      background-size: 200px;
+      background-blend-mode: difference;
+      opacity: var(--card-pattern-opacity, 0.03);
+      pointer-events: none;
+      border-radius: inherit;
+    }
+    :root.dark.mods-card-pattern .card-base::before,
+    :root.dark.mods-card-pattern .float-panel::before {
+      background-blend-mode: screen;
+    }
+  }
+
+  :root.dark .float-panel {
+    @apply shadow-none;
+  }
+
+  /* 魔改：卡片外壳 —— 1px 淡蓝主色描边 + 卡片外侧一圈柔和暗晕
+     （即 1.4.73「关于我」页那套卡片效果的全站版；1.4.76 曾从关于我页移除，
+     现改为由后台/访客开关按需全站启用，默认关）。
+     仅 <html class="mods-card-shell"> 时生效 → 关闭时完全回到无壳外观（零副作用）。
+
+     ⚠️ 为何用 outline 而不是 border：
+       1) 瀑布流（masonry）下 post-list-layout.js 会把 .post-card-item 绝对定位并
+          写死行内 width/height，border 会改变盒模型尺寸、与 JS 算出的高度互相干扰；
+       2) 上游 .btn-card-outline 已用 border，此处若也用 border 会互相覆盖；
+       3) outline 不参与布局，且可用 outline-offset 制造「描边浮在卡片外沿」的观感。
+     ⚠️ 为何描边 + 暗晕都挂在卡片自身而不是外层 wrapper：全站 77 处 .card-base
+       散落在各页面，无统一 wrapper；只在卡片自身加 shadow 即可获得「浮起」观感。
+
+     配色：描边 = 主色 14% 混入分隔线色（与关于我页原值一致，随主题色相联动）；
+           暗晕 = #3a5b89（冷蓝）8% 透明度、向下偏移 0.7rem、模糊 1.8rem，
+           是「暗晕」而非纯黑阴影，避免在浅色卡片下显脏。 */
+  :root.mods-card-shell .card-base:not(.btn-regular):not(.bg-\(--primary\)),
+  :root.mods-card-shell
+    .btn-card:not(.btn-regular):not(.floating-btn .btn-card):not(
+      .bg-\(--primary\)
+    ),
+  :root.mods-card-shell .float-panel,
+  :root.mods-card-shell .pager-strip {
+    outline: 1px solid
+      color-mix(in srgb, var(--primary) 14%, var(--line-divider));
+    outline-offset: -1px;
+    box-shadow: 0 0.7rem 1.8rem #3a5b890f;
+  }
+
+  /* 暗色下：描边提亮一点才看得见（暗底上 14% 主色几乎不可辨），
+     暗晕改用纯黑低透明度——冷蓝阴影在深底上会显灰。 */
+  :root.dark.mods-card-shell
+    .card-base:not(.btn-regular):not(.bg-\(--primary\)),
+  :root.dark.mods-card-shell
+    .btn-card:not(.btn-regular):not(.floating-btn .btn-card):not(
+      .bg-\(--primary\)
+    ),
+  :root.dark.mods-card-shell .float-panel,
+  :root.dark.mods-card-shell .pager-strip {
+    outline-color: color-mix(in srgb, var(--primary) 26%, var(--line-divider));
+    box-shadow: 0 0.7rem 1.8rem rgb(0 0 0 / 0.22);
+  }
+
+  /* ===== 卡片视觉分层：主列重、侧栏轻（2026-09-18 LQ 选定「排版优化」方向）=====
+     全站 12+ 个卡片外壳同一重量 ⇒ 视线没有主次。两侧栏（#sidebar / #right-sidebar）
+     是「容器」，退到最轻：去外壳描边与暗晕、卡片纹理只留一丝；
+     主列文章卡保持完整外壳，成为页面上唯一的「重」元素。
+     ⚠️ 只动装饰层（outline / box-shadow / 纹理 opacity），--card-bg、圆角、内部布局
+        一律不碰 ⇒ 结构、透明模式、可读性零影响。
+     ⚠️ 特异性：外壳规则是纯 class 组合（0-5-1 级），这里带 ID（1-1-0 级）稳胜，无需
+        !important；暗色变体只改 outline-color/box-shadow 颜色，一并被 outline:none/
+        box-shadow:none 覆盖。 */
+  :root.mods-card-shell #sidebar .card-base,
+  :root.mods-card-shell #right-sidebar .card-base {
+    outline: none;
+    box-shadow: none;
+  }
+
+  /* 纹理同思路：侧栏只留 40% 浓度的一丝水印（亮暗两套 blend-mode 都适用）。
+     包在与原纹理相同的 >=768px 媒体查询里 ⇒ 手机端依旧零下载零解码。 */
+  @media (min-width: 768px) {
+    :root.mods-card-pattern #sidebar .card-base::before,
+    :root.mods-card-pattern #right-sidebar .card-base::before {
+      opacity: calc(var(--card-pattern-opacity, 0.03) * 0.4);
+    }
+  }
+
+  /* ===== 置顶卡片 vs 卡片外壳：必须一眼可辨（2026-09-13 LQ 要求）=====
+     开关模式下普通卡 = 1px / 14% 淡描边 + 8% 极淡暗晕（几乎只是「有边」）。
+     置顶卡必须**明显强于**这个基线，否则「置顶」在视觉上消失。做法：
+       · 描边加粗到 2px + 主色饱和度提到 60%（普通卡 14% → 4 倍差距）
+       · 用 outline-offset: 2px 把环**推到卡片外侧**（普通卡是 -1px 贴内沿）
+         ⇒ 一个「内贴细线」 vs 一个「外浮粗环」，形态本身就不一样
+       · 暗晕换成主色实色投影（28%）+ 轻微外发光，与普通卡的冷蓝#3a5b89 区分
+     ⚠️ 特异性：本选择器含 ID（1-4），胜过卡片外壳的纯 class（0-7）⇒ 无需 !important。
+     ⚠️ 仍用 outline（不用 border）：瀑布流下 JS 写死行内 width/height，border 会改盒模型。 */
+  :root.mods-card-shell #post-list-container .post-card.is-pinned {
+    outline: 2px solid color-mix(in srgb, var(--primary) 60%, transparent);
+    outline-offset: 2px;
+    box-shadow:
+      0 0 0 4px color-mix(in srgb, var(--primary) 10%, transparent),
+      0 6px 22px color-mix(in srgb, var(--primary) 28%, transparent);
+  }
+  /* 暗色：描边再提亮一档，保证深底上「置顶环」依然醒目 */
+  :root.dark.mods-card-shell #post-list-container .post-card.is-pinned {
+    outline-color: color-mix(in srgb, var(--primary) 75%, transparent);
+    box-shadow:
+      0 0 0 4px color-mix(in srgb, var(--primary) 16%, transparent),
+      0 6px 22px rgb(0 0 0 / 0.35);
+  }
+
+  /* 标签胶囊：hover 上浮 + 同色光晕（用 currentColor，随各自文字色走）。
+     唯一消费方 = /tags 标签云页（`class="tag-item tag-chip"`，页面级 .tag-item
+     自带 --tag-depth 渐深配色；它所在卡片有 px-9 py-6 内边距，自带上浮缓冲）。
+     根因历史：组件 class 上的 Tailwind `hover:-translate-y-0.5`（utilities 层）
+       优先级高于本处 transform，曾导致位移被 card-base 的 overflow-hidden 裁掉；
+       已去掉该工具类。
+     ⚠️ 侧边栏「标签」小组件（components/widget/Tags.astro）2026-09-14 已按上游
+       还原成 `btn-regular` 朴素胶囊 ⇒ **不再**使用本类、也不再注入 tag.spec.color；
+       当初为它在组件容器加的 pt-2/pr-1/pb-1 缓冲与配色注入说明已一并删除。 */
+  .tag-chip {
+    transition:
+      transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+      box-shadow 0.2s ease,
+      filter 0.2s ease;
+  }
+  .tag-chip:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 12px -4px
+      color-mix(in srgb, currentColor 45%, transparent);
+    filter: saturate(1.15);
+  }
+  .tag-chip:focus-visible {
+    /* --focus-ring 而非 --primary：后者在浅色底上约 2.7:1，达不到 WCAG 2.4.11 的 3:1 */
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  /* navbar_blur 开启：显式 transition 不含 background-color，消除模糊延迟 */
+  body.navbar-blur-enabled .float-panel {
+    transition:
+      transform 150ms cubic-bezier(0.4, 0, 0.2, 1),
+      translate 150ms cubic-bezier(0.4, 0, 0.2, 1),
+      opacity 150ms cubic-bezier(0.4, 0, 0.2, 1) !important;
+    background-color: rgb(255 255 255 / 0.62) !important;
+    -webkit-backdrop-filter: saturate(180%) blur(20px) !important;
+    backdrop-filter: saturate(180%) blur(20px) !important;
+  }
+
+  :root.dark body.navbar-blur-enabled .float-panel {
+    transition:
+      transform 150ms cubic-bezier(0.4, 0, 0.2, 1),
+      translate 150ms cubic-bezier(0.4, 0, 0.2, 1),
+      opacity 150ms cubic-bezier(0.4, 0, 0.2, 1) !important;
+    background-color: rgb(0 0 0 / 0.65) !important;
+    -webkit-backdrop-filter: saturate(180%) blur(20px) !important;
+    backdrop-filter: saturate(180%) blur(20px) !important;
+  }
+
+  .float-panel-closed {
+    @apply pointer-events-none -translate-y-1 opacity-0;
+  }
+
+  .search-panel mark {
+    @apply bg-transparent text-(--primary);
+  }
+
+  .btn-card {
+    @apply flex items-center justify-center bg-(--card-bg) transition hover:bg-(--btn-card-bg-hover) active:bg-(--btn-card-bg-active);
+  }
+
+  .btn-card.disabled {
+    @apply pointer-events-none text-black/10 dark:text-white/10;
+  }
+
+  /* ===== 分页：一体化分段控件（2026-09-19 重构）=====
+     旧版（mods-card-shell 开启时）：strip 是卡片底、每个数字又是 .btn-card、
+     两个 chevron 也是 .btn-card ⇒ 一排 5+ 个各自带描边+暗晕的「卡包卡」。
+     新版：一个容器（.pager-strip，外壳在上面 shell 段只加一次），内部按钮
+     透明、hover/active 才出底色；当前页保留主色胶囊。 */
+  .pager-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    height: 2.75rem;
+    min-width: 2.75rem;
+    border-radius: 0.5rem;
+    transition:
+      background-color 0.15s ease,
+      transform 0.1s ease;
+  }
+  .pager-btn:hover {
+    background: var(--btn-card-bg-hover);
+  }
+  .pager-btn:active {
+    background: var(--btn-card-bg-active);
+    transform: scale(0.9);
+  }
+  .pager-btn-disabled {
+    pointer-events: none;
+    opacity: 0.25;
+  }
+  .pager-num-current {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    height: 2.75rem;
+    min-width: 2.75rem;
+    padding-inline: 0.375rem;
+    border-radius: 0.5rem;
+    background: var(--primary);
+    color: #fff;
+  }
+  :root.dark .pager-num-current {
+    color: rgb(0 0 0 / 0.7);
+  }
+  .pager-ellipsis {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    height: 2.75rem;
+    padding-inline: 0.25rem;
+    color: rgb(163 163 163 / 0.7);
+  }
+  :root.dark .pager-ellipsis {
+    color: #737373;
+  }
+
+  .btn-card-outline {
+    border: 1px solid color-mix(in oklab, var(--primary) 15%, transparent);
+  }
+
+  .btn-plain {
+    @apply relative flex items-center justify-center bg-transparent text-black/75 transition hover:text-(--primary) dark:text-white/75 dark:hover:text-(--primary);
+  }
+
+  .btn-plain:not(.scale-animation) {
+    @apply hover:bg-(--btn-plain-bg-hover) active:bg-(--btn-plain-bg-active);
+  }
+
+  .scale-animation {
+    @apply relative z-0 before:absolute before:inset-0 before:-z-10 before:scale-[0.85] before:rounded-xl before:transition before:ease-out hover:before:scale-100 hover:before:bg-(--btn-plain-bg-hover) active:bg-transparent active:before:bg-(--btn-plain-bg-active);
+  }
+
+  .btn-plain.scale-animation.current-theme-btn {
+    @apply text-(--primary) before:scale-100 before:bg-(--btn-plain-bg-hover) before:opacity-100;
+  }
+
+  .btn-regular {
+    @apply flex items-center justify-center bg-(--btn-regular-bg) text-(--btn-content) transition hover:bg-(--btn-regular-bg-hover) active:bg-(--btn-regular-bg-active) dark:text-white/75;
+  }
+
+  .text-90 {
+    @apply text-black/90 dark:text-white/90;
+  }
+
+  .text-75 {
+    @apply text-black/75 dark:text-white/75;
+  }
+
+  .text-50 {
+    @apply text-black/60 dark:text-white/60;
+  }
+
+  /* 原 black/30（≈2:1）不满足 WCAG AA 普通文本对比度要求，提升至 black/50（≈3.2:1）；
+     保持与 text-50(black/60) 的层级差异 */
+  .text-30 {
+    @apply text-black/50 dark:text-white/50;
+  }
+
+  .meta-icon {
+    @apply mr-2 flex h-8 w-8 items-center justify-center rounded-md bg-(--btn-regular-bg) text-(--btn-content) transition;
+  }
+
+  /* 卡片图标盒：内联 SVG（后台自定义图标）按字号 1em 渲染，与 mask 图标/首字母大小一致 */
+  .card-icon svg {
+    width: 1em;
+    height: 1em;
+  }
+
+  .with-divider {
+    @apply before:mx-1.5 before:text-sm before:font-medium before:text-(--meta-divider) before:content-['/'];
+  }
+
+  .toc-hide {
+    @apply pointer-events-none opacity-0;
+  }
+
+  /* 换页期间隐藏目录（两栏 #toc-wrapper + 三栏右侧边栏 TOC）：门控挂在
+     <html> 的 toc-not-ready 类上而非容器自身——Swup 换页会替换
+     #toc-container / #right-sidebar 容器，加在旧节点上的类随旧节点销毁，
+     新节点无类导致换页期间目录提前显示；<html> 不被 Swup 替换，
+     标记跨换页存活（visit:start 加、visit:end 移除，见 app.ts） */
+  html.toc-not-ready #toc-wrapper,
+  html.toc-not-ready #right-sidebar table-of-contents {
+    pointer-events: none;
+    opacity: 0;
+  }
+
+  /* 两栏悬浮目录宽度限制：视口不足以容纳最小目录宽度时隐藏，避免目录在
+     窄屏下挤成一条线。断点与 variables.css 的 --toc-width 公式联动
+     （两栏 --page-width 固定 75rem）：
+     --toc-width = (100vw - 75rem)/2 - 1rem >= 6rem  →  视口 >= 89rem。
+     改动 --toc-width 公式或两栏 page-width 时需同步此断点 */
+  @media (max-width: 88.99rem) {
+    #toc-wrapper {
+      display: none !important;
+    }
+  }
+
+  #toc-inner-wrapper {
+    mask-image: linear-gradient(
+      to bottom,
+      transparent 0%,
+      black 2rem,
+      black calc(100% - 2rem),
+      transparent 100%
+    );
+  }
+
+  /* 右侧边栏音乐播放器 - 彻底取消所有 overflow:hidden 层级 */
+  #right-sidebar .firefly-music-player,
+  #right-sidebar widget-layout:has(.firefly-music-player),
+  #right-sidebar widget-layout:has(.firefly-music-player) .collapse-wrapper,
+  #right-sidebar .firefly-music-player .music-cover,
+  #right-sidebar .firefly-music-player .lrc-drawer {
+    overflow: visible !important;
+  }
+
+  #right-sidebar .firefly-music-player .vol-container {
+    @apply w-12;
+  }
+
+  #right-sidebar .firefly-music-player .btn-lrc-toggle {
+    @apply hidden;
+  }
+
+  /* 双栏布局页面宽度：与 72002dd 一致，使用默认 --page-width: 75rem */
+  .layout-two-column {
+    /* 使用默认 --page-width，无需覆盖 */
+  }
+
+  /* 三栏布局页面宽度：条件式恢复上游 93.5rem。
+     原因：原 .layout-three-column{--page-width:93.5rem!important} 与
+     :root.mods-page-wide 同特异性(0,1,0)且打包后同文件后声明，会压制宽屏 112rem，
+     导致“宽屏开关开了但三栏宽度不变”。直接删掉又会让关闭宽屏时三栏回落到 75rem
+     （比上游 93.5rem 窄，三栏内容列过挤、显示错误）。
+     现用 :not(.mods-page-wide) 限定：仅【未开启宽屏】时三栏回到上游 93.5rem；
+     开启宽屏时此规则不命中，由 variables.css 的 :root.mods-page-wide .layout-three-column
+     (0,3,0) 接管为 112rem。两态均正确。 */
+  :root:not(.mods-page-wide) .layout-three-column {
+    --page-width: 93.5rem !important;
+  }
+
+  .hide-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .hide-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* 主内容面板顶部位置（原 MainGridLayout th:style 内联，改 CSS 驱动以支持
+     访客运行期切换壁纸模式）：无横幅（disabled/transparent）→ 贴顶；横幅/全屏
+     （enable-banner）→ 交叠 banner 底边（--panel-overlap） */
+  #main-panel-wrapper {
+    top: var(--no-banner-panel-top);
+  }
+
+  #main-grid {
+    min-height: calc(100vh - var(--no-banner-panel-top));
+    /* home-switch 时 grid 的 translate 与 #main-panel-wrapper 的 top 切换同步
+       （同 --dur-banner / 同曲线），保持网格/横幅同帧滑动（见下方
+       .enable-banner #main-grid 注释）。Tailwind 的 transition utility 默认
+       transition-property 不含独立的 translate 属性（仅含 transform），不能动
+       translate → 此处显式声明 transition: translate（1.3.5：去掉 grid 的
+       Tailwind `transition duration-[var(--dur-banner)]` 后补回）。
+       首帧禁用：CSS 默认 translate: none ↔ 长度值不可插值（CSS Transforms 2），
+       启用过渡会在首帧形成瞬移；同时首帧 --banner-height-extend 从 vh 兜底
+       切到 JS px 时，禁用过渡可避免该过渡被纳入 CLS 计分窗口。复用现有
+       html:not(.page-ready) 范式（与 #wave-container 一致，app.ts 双 rAF 后
+       加 page-ready 恢复） */
+    transition: translate var(--dur-banner, 700ms)
+      var(--default-transition-timing-function, cubic-bezier(0.4, 0, 0.2, 1));
+  }
+
+  html:not(.page-ready) #main-grid {
+    transition: none;
+  }
+
+  .enable-banner #main-grid {
+    min-height: calc(100vh - var(--banner-height) + var(--panel-overlap));
+  }
+
+  .enable-banner #main-panel-wrapper {
+    top: calc(var(--banner-height) - var(--panel-overlap));
+  }
+
+  /* 全屏模式首页：banner 占满整屏，内容区从 100vh 之下开始（不交叠）。
+     top = 100vh − 延伸像素，与 #main-grid 的 translate-y-(--banner-height-extend)
+     抵消后精确落在 100vh，避免延伸像素取整导致的顶部残留露白。
+     +--banner-home-content-gap：首页内容区顶部留出的页面背景间距（原
+     #main-grid padding-top）。折进 panel top 而非 padding——该 top 在首页↔
+     其他页切换时由 home-switch 过渡（html.home-switch #main-panel-wrapper
+     transition: top）平滑变化，padding 需单独补 transition-property 且易
+     失步/闪烁，折进来则天然无闪烁。
+     全屏标记统一读 <html data-banner-display>（与 JS 同源，无 body class） */
+  html[data-banner-display="fullscreen"] body.is-home #main-panel-wrapper {
+    top: calc(
+      var(--banner-height-home) - var(--banner-height-extend) +
+        var(--banner-home-content-gap)
+    ) !important;
+  }
+
+  /* 全屏首页向下箭头（#scroll-down-indicator）的落点间距：网格顶边向上留出
+     --banner-home-content-gap，使"页面背景顶部边缘"（banner 底边，100vh）对齐
+     视口顶部而非内容/组件顶边贴住视口顶。间距值由 scroll-manager.ts 的
+     scrollDownToContent() 直接读 CSS 变量换算（Chrome 平滑 scrollIntoView 会
+     忽略 scroll-margin，只能 JS 手算），不再借用 scroll-margin-top 传值 */
+
+  /* 首页↔其他页切换：panel 的 top（35vh ↔ 35vh−3.5rem）原为瞬变，swap 瞬间
+     内容+组件跳变 3.5rem 形成"先闪"；home-switch 阶段给 top 加与网格/banner
+     同速（--dur-banner）同曲线过渡，消除瞬跳，整体平滑联动 */
+  html.home-switch #main-panel-wrapper {
+    transition: top var(--dur-banner, 700ms)
+      var(--default-transition-timing-function, cubic-bezier(0.4, 0, 0.2, 1));
+  }
+
+  /* 布局/瀑布流切换：旧内容出场动画（下滑淡出，与 Swup 退场同方向），
+     出场结束后由 setting-utils.ts 挂 content-entrance-animating 播放入场动画，
+     形成完整的出场→入场切换。退出时长用 --dur-swup、延迟归零
+     （覆盖 transition.css 里 #content-wrapper 的入场错峰延迟） */
+  #content-wrapper.content-exit-animating {
+    animation: content-exit var(--dur-swup, 200ms)
+      var(--default-transition-timing-function, cubic-bezier(0.4, 0, 0.2, 1))
+      forwards;
+    animation-delay: 0ms;
+  }
+  @keyframes content-exit {
+    to {
+      opacity: 0;
+      translate: 0 2rem;
+    }
+  }
+
+  /* 布局/瀑布流切换入场：与页面入场（.onload-animation 的 fade-in-up）同款
+     动画与错峰延迟，入场结束后由 setting-utils.ts 摘除类（不用 onload-animation
+     本类，避免被 app.ts 的 animationend 委托在同一次事件里误删） */
+  #content-wrapper.content-entrance-animating {
+    opacity: 0;
+    animation: var(--dur-entry, 300ms) fade-in-up;
+    animation-fill-mode: forwards;
+    animation-delay: min(var(--content-delay), var(--dur-entry-max, 400ms));
+  }
+
+  /* 波浪位置完全由 CSS 驱动：
+       基值 —— 底边盖过 banner 底边（35vh）+ 4px 覆盖量（--wave-cover-offset）；
+       首页（body.is-home）—— 再加延伸量 --banner-height-extend（px，head 脚本 /
+       banner-sync 写入），波浪底边落到首页 banner 底边（65vh / 100vh）；
+       全屏首页 —— 再整体下移 20%（translateY 的 % 即元素自身高度，各断点
+       h-28/32/36 等比下移，只露出波峰层，实心底部移出视口）。
+      使用 transform 而非 translate 属性：与 1.1.0 一致（该版本在 Edge 下无
+      "波浪与页面顶部边缘"合成缝隙）。translate 属性层在非整数 devicePixelRatio
+      （如 1.5）下栅格化边界处理不同，动画时会在波浪边界露 1px 缝；transform
+      走独立合成路径无此问题。锁步不依赖属性——同 --dur-banner、同缓动、
+      同帧切换（body.is-home）即可严格同步。CSS 驱动保留：修复 Safari 首帧
+      getComputedStyle 读不到延伸量的时序问题 */
+
+  #wave-container {
+    top: var(--banner-height);
+    transform: translateY(calc(-100% + var(--wave-cover-offset)));
+    /* 时长与 banner 装配件统一用 --dur-banner（随速度档位）：
+       硬编码 700ms 会在舒缓档（800ms）/疾速档（500ms）与 banner/主网格
+       移速不一致，wave 领先产生间隙 */
+    transition: transform var(--dur-banner, 700ms)
+      var(--default-transition-timing-function, cubic-bezier(0.4, 0, 0.2, 1));
+  }
+
+  body.is-home #wave-container {
+    transform: translateY(
+      calc(-100% + var(--wave-cover-offset) + var(--banner-height-extend))
+    );
+  }
+
+  html[data-banner-display="fullscreen"] body.is-home #wave-container {
+    transform: translateY(
+      calc(-100% + var(--wave-cover-offset) + var(--banner-height-extend) + 20%)
+    );
+  }
+
+  /* 加载早期（页面未就绪）wave 不过渡：避免 is-home 初始校正时 transform
+     带 700ms 过渡形成"横向条带"位移观感；app.ts 首次同步完成后（双 rAF）
+     给 <html> 加 page-ready 恢复平滑过渡 */
+  html:not(.page-ready) #wave-container {
+    transition: none;
+  }
+
+  /* 显式 0 长度基值：is-home 切换时 translate 在 length↔length 间过渡。
+     translate: none 与长度不可插值（CSS Transforms 2），会导致网格瞬移。
+     wave 用 transform、网格/banner 用 translate，属性不同但同为 --dur-banner、
+     同缓动、同帧切换（body.is-home），天然同步滑动，
+     无需任何 is-changing 覆盖（wave 保持自然过渡，不闪现） */
+  .enable-banner #main-grid,
+  .enable-banner #banner-wrapper {
+    translate: 0 0;
+  }
+
+  /* banner 媒体容器恒渲染（原 th:if + th:style 内联 top，改 CSS 驱动以支持
+     访客运行期切换壁纸模式）；disabled 整体隐藏、transparent 由固定定位覆写 */
+  #banner-wrapper {
+    top: calc(-1 * var(--banner-height-extend));
+  }
+
+  .enable-banner #banner-wrapper {
+    @apply h-(--banner-height-home);
+  }
+
+  .enable-banner #banner,
+  .enable-banner #banner-mobile {
+    @apply h-(--banner-height-home) translate-y-(--bannerOffset);
+  }
+
+  .enable-banner #top-row {
+    @apply transition-all duration-300;
+    height: calc(var(--banner-height-home) - var(--navbar-height));
+  }
+
+  /* Banner 渐显：静态 opacity-0/scale-105 + app.ts showBanner() 等 img.onload
+     回调移除 class，CSS transition 驱动过渡。渐显必须绑定图片加载完成时刻——
+     图片就绪才解除遮蔽，保证「图片出现即渐显」的观感；若用 CSS 无条件动画
+     则与加载时序脱钩，慢加载图片会先空白后硬闪现（视觉回归，已回退）。 */
+  /* 标题/副标题淡入淡出：时长与 banner 装配件位移统一（--dur-banner 随档位） */
+  #banner-overlay {
+    transition: opacity var(--dur-banner, 700ms) ease;
+  }
+
+  #banner-overlay.banner-text-hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* 全屏模式首页：向下滚动指示箭头（点击平滑滚动到内容区）。
+     独立于 #banner-overlay 渲染，故不受 bannerText.enable 影响；
+     仅全屏模式首页显示（html[data-banner-display=fullscreen] + body.is-home 门控，
+     非全屏模式由 html:not([data-banner-display=fullscreen]) 隐藏，原 th:if 移除），
+     非首页由 body:not(.is-home) 隐藏，避免换页后产生不可见热区 */
+  #scroll-down-indicator {
+    position: absolute;
+    z-index: 20;
+    bottom: 5rem;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgb(255 255 255 / 0.85);
+    cursor: pointer;
+    transition: color 0.3s ease;
+  }
+
+  body:not(.is-home) #scroll-down-indicator {
+    display: none;
+  }
+
+  #scroll-down-indicator:hover {
+    color: rgb(255 255 255 / 1);
+  }
+
+  #scroll-down-indicator .scroll-down-icon {
+    font-size: 4.5rem;
+    line-height: 1;
+    animation: scroll-down-bounce 2s ease-in-out infinite;
+    filter: drop-shadow(0 2px 6px rgb(0 0 0 / 0.3));
+  }
+
+  @media (max-width: 767.98px) {
+    #scroll-down-indicator .scroll-down-icon {
+      font-size: 3.5rem;
+    }
+
+    #scroll-down-indicator {
+      bottom: 4rem;
+    }
+  }
+
+  @keyframes scroll-down-bounce {
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+
+    50% {
+      transform: translateY(8px);
+    }
+  }
+
+  /* ── 访客壁纸模式切换支持 ──
+     #banner-wrapper 已去掉 th:if 恒渲染，显隐/定位全部由 html[data-banner-display]
+     门控，访客运行期切换模式无需重建 DOM。disabled：横幅整体隐藏（含署名/箭头）；
+     波浪仅横幅/全屏显示，透明模式与访客关闭（body.wave-disabled）亦隐藏 */
+  html[data-banner-display="disabled"] #banner-wrapper,
+  html[data-banner-display="disabled"] #banner-credit,
+  html[data-banner-display="disabled"] #scroll-down-indicator,
+  html[data-banner-display="disabled"] #wave-container,
+  html[data-banner-display="transparent"] #wave-container,
+  body.wave-disabled #wave-container {
+    display: none !important;
+  }
+
+  /* 首页壁纸标题访客关闭：opacity 过渡渐隐（替代原 display:none，支持平滑过渡） */
+  body.banner-title-disabled #banner-overlay {
+    opacity: 0 !important;
+    pointer-events: none;
+  }
+
+  /* 壁纸标题开关重新开启时的入场动画（fade-in-up，与首载一致） */
+  .banner-title-enter #banner-title,
+  .banner-title-enter #banner-subtitle-wrapper {
+    animation-name: fade-in-up;
+    animation-duration: var(--dur-entry, 300ms);
+    animation-timing-function: ease;
+    animation-fill-mode: forwards;
+  }
+  .banner-title-enter #banner-title {
+    animation-delay: min(50ms, var(--dur-entry-max, 400ms));
+  }
+  .banner-title-enter #banner-subtitle-wrapper {
+    animation-delay: min(130ms, var(--dur-entry-max, 400ms));
+  }
+
+  /* 向下滚动箭头仅全屏模式显示（原 th:if fullscreen，改 CSS 门控） */
+  html:not([data-banner-display="fullscreen"]) #scroll-down-indicator {
+    display: none;
+  }
+
+  /* 目录仅在横幅/全屏模式隐藏（原服务端 bannerHasMedia 的 toc-hide，改 CSS 门控）。
+     门控滚动感知：html:not(.toc-revealed) 表示视口仍在顶部横幅区（首帧默认隐藏
+     防 FOUC），滚动超过横幅高度后由 scroll-manager 加 .toc-revealed 解除隐藏；
+     disabled/transparent 模式无门控，目录恒显 */
+  html[data-banner-display="banner"]:not(.toc-revealed) #toc-wrapper,
+  html[data-banner-display="fullscreen"]:not(.toc-revealed) #toc-wrapper {
+    pointer-events: none;
+    opacity: 0;
+  }
+
+  /* 壁纸模式切换过渡：panel top / grid min-height·translate 随模式变化平滑过渡
+     （复用 --dur-banner）。由 applyBannerDisplay 临时加 html.banner-mode-transitioning
+     启用，过渡结束后移除恢复默认 */
+  html.banner-mode-transitioning #main-panel-wrapper,
+  html.banner-mode-transitioning #main-grid {
+    transition:
+      top var(--dur-banner, 700ms)
+        var(--default-transition-timing-function, cubic-bezier(0.4, 0, 0.2, 1)),
+      min-height var(--dur-banner, 700ms)
+        var(--default-transition-timing-function, cubic-bezier(0.4, 0, 0.2, 1)),
+      translate var(--dur-banner, 700ms)
+        var(--default-transition-timing-function, cubic-bezier(0.4, 0, 0.2, 1));
+  }
+
+  /* ── 全屏透明模式（displayMode == 'transparent'）──
+     布局等同「关闭」（无 enable-banner：内容区贴顶、无波浪/横幅文字），
+     仅把 #banner-wrapper 的媒体层（单图/视频/轮播/移动端图）复用为整屏
+     壁纸：fixed 铺满、位于内容下方。结合「高级材质」（navbar-blur-enabled）
+     使内容/组件卡片磨砂透明，露出壁纸 */
+  html[data-banner-display="transparent"] #banner-wrapper {
+    position: fixed !important;
+    inset: 0 !important;
+    height: 100vh !important;
+    height: 100lvh !important;
+    z-index: 0 !important;
+    opacity: var(--transparent-wallpaper-opacity, 0.8) !important;
+  }
+
+  html[data-banner-display="transparent"] #banner,
+  html[data-banner-display="transparent"] #banner-mobile {
+    height: 100% !important;
+  }
+
+  /* 壁纸背景不需要横幅文字/署名/媒体播放按钮 */
+  html[data-banner-display="transparent"] #banner-overlay,
+  html[data-banner-display="transparent"] #banner-credit,
+  html[data-banner-display="transparent"] #banner-play-btn,
+  html[data-banner-display="transparent"] #banner-play-btn-mobile {
+    display: none !important;
+  }
+
+  /* 壁纸磨砂：背景图片/视频模糊 + 轻压暗，形成柔和的背景遮罩
+     （与 Firefly overlay 同思路）；卡片靠半透明背景透出这张模糊壁纸来
+     呈现磨砂感（见下方说明），因此壁纸模糊值即磨砂强度；
+     scale 放大裁掉模糊边缘（外层 overflow-hidden 兜底）。
+     独立于「高级材质」开关 */
+  html[data-banner-display="transparent"] #banner img,
+  html[data-banner-display="transparent"] #banner-mobile img,
+  html[data-banner-display="transparent"] #banner video,
+  html[data-banner-display="transparent"] #banner-mobile video {
+    filter: blur(var(--transparent-wallpaper-blur, 10px)) brightness(0.95);
+    transform: scale(1.06);
+  }
+
+  /* 卡片磨砂：需同时开启 banner「全屏透明」与「高级材质」两个开关。
+     作用于文章卡（.post-card）、页面级大容器、侧边栏组件卡、浮层面板、
+     导航栏（.navbar-blur）、悬浮按钮（.floating-btn），以及列表条目卡
+     （.btn-card-outline：瞬间/分类/装备/友链/日程/项目集等）。
+     仅 .btn-regular（标签卡）保持纯色。
+     实现方式：卡片只做半透明背景（不透出壁纸），不加 backdrop-filter——
+     磨砂感来自壁纸自身的模糊透过卡片透出。若给卡片加 backdrop-filter，
+     换页/入场动画中祖先 opacity<1 会形成 backdrop root，挡掉卡片对壁纸的
+     采样，磨砂会在过渡动画期间暂时消失（淡入结束才"啪"地出现）。
+     注意：不可用 .bg-(--card-bg) 通配——会命中 #post-list-container 等
+     包装容器使其成为 backdrop root，内层卡片失效；也不可覆盖
+     .bg-(--primary)（分组控件选中态的主题色高亮）
+     ⚠️ 同理排除 `.is-active`：/portfolio 的 .pf-chip、/links 的 .link-chip 用
+     **页面级无 layer 规则**（`.xx-chip.is-active { background: var(--primary) }`）
+     画选中态，普通声明挡不住本条 !important ⇒ 选中胶囊会丢掉主色底、只剩
+     原本的反色文字（亮色模式白字）⇒ **白字叠在白半透明底上整条不可见**
+     （暗色模式黑字叠黑底，同样不可见）。选中态属于「主色高亮」，本就该保持
+     实心，与 .bg-(--primary) 同一类，故一并排除。
+
+     ⭐ 同时重定义 --card-bg：本条只强制了**容器自身**的 background-color，
+     而各页大量「自绘面」（首页精选卡、/portfolio 的 .pf-card 与封面、
+     /about 的 .about-tile/.about-subnav/.about-stub-row、/blog-changelog 的
+     .cl-stat/.cl-milestone 等）写的是 `background: var(--card-bg)`。变量本身
+     没被改 ⇒ 它们仍解析到 :root 的**实心** white/黑 ⇒ 在磨砂卡里叠成一块块
+     实心色板，「不受透明影响」。令牌与容器实底色对齐后，这些派生面自然跟随
+     （color-mix 派生色也随 alpha 一起走，层次关系不变）。 */
+  html[data-banner-display="transparent"]
+    body.navbar-blur-enabled
+    .card-base:not(.btn-regular):not(.bg-\(--primary\)),
+  html[data-banner-display="transparent"]
+    body.navbar-blur-enabled
+    .btn-card:not(.btn-regular):not(.is-active):not(
+      .floating-btn .btn-card
+    ):not(.bg-\(--primary\)),
+  html[data-banner-display="transparent"] body.navbar-blur-enabled .float-panel,
+  html[data-banner-display="transparent"] body.navbar-blur-enabled .navbar-blur,
+  html[data-banner-display="transparent"]
+    body.navbar-blur-enabled
+    .floating-btn {
+    background-color: rgb(
+      255 255 255 / var(--transparent-card-alpha, 0.6)
+    ) !important;
+    --card-bg: rgb(255 255 255 / var(--transparent-card-alpha, 0.6));
+  }
+
+  :root.dark[data-banner-display="transparent"]
+    body.navbar-blur-enabled
+    .card-base:not(.btn-regular):not(.bg-\(--primary\)),
+  :root.dark[data-banner-display="transparent"]
+    body.navbar-blur-enabled
+    .btn-card:not(.btn-regular):not(.is-active):not(
+      .floating-btn .btn-card
+    ):not(.bg-\(--primary\)),
+  :root.dark[data-banner-display="transparent"]
+    body.navbar-blur-enabled
+    .float-panel,
+  :root.dark[data-banner-display="transparent"]
+    body.navbar-blur-enabled
+    .navbar-blur,
+  :root.dark[data-banner-display="transparent"]
+    body.navbar-blur-enabled
+    .floating-btn {
+    background-color: rgb(
+      0 0 0 / var(--transparent-card-alpha, 0.6)
+    ) !important;
+    --card-bg: rgb(0 0 0 / var(--transparent-card-alpha, 0.6));
+  }
+
+  /* 首页「精选两卡行」补漏：这排卡**不挂 .card-base**（自有 .featured-card 骨架，
+     底色写的是 background: var(--card-bg)）⇒ 上面的卡片磨砂选择器命中不到它，
+     全屏透明 + 高级材质下它俩仍是实心白（暗色下实心黑）块，与周围磨砂卡割裂。
+     修法 = 在行容器上重定义 --card-bg（只作用本行，不外泄）。
+     ⭐ 为什么用「重定义变量」而不是 flat 覆写 background：卡片内部还有 5 处派生底色
+     （动作胶囊 78% / ‹› 按钮常态 92% + 悬停 96% / 右上角标星 76% / 无封面兜底渐变）
+     都写作 color-mix(… var(--card-bg) N%, transparent)。变量一改它们全部跟着走，
+     且「派生色恒比卡底更透」的相对层次与原设计完全一致。
+     🔴 别改成直接覆写 .featured-card 的 background —— 那样卡底降到 0.6 而派生色
+     仍按 0.78/0.76 白算，胶囊与星标会反过来比卡底更实、浮成一坨白块。
+     门控与上面 .card-base 那组严格一致：全屏透明 + 高级材质，缺一不生效。 */
+  html[data-banner-display="transparent"]
+    body.navbar-blur-enabled
+    .featured-row {
+    --card-bg: rgb(255 255 255 / var(--transparent-card-alpha, 0.6));
+  }
+  :root.dark[data-banner-display="transparent"]
+    body.navbar-blur-enabled
+    .featured-row {
+    --card-bg: rgb(0 0 0 / var(--transparent-card-alpha, 0.6));
+  }
+
+  /* ⚠️ 右卡「三档叠层」在磨砂模式下的改法**不在这里**，在
+     `components/FeaturedCards.astro` 的 `<style is:global>` 块里。
+     原因：本文件整包在 `@layer components`，而 `.featured-card` 那套骨架是
+     **未分层(unlayered)** 的全局样式 —— 级联上「无 layer 的普通声明」恒胜
+     「有 layer 的普通声明」，与选择器写多特异都无关 ⇒ 在这里写
+     background / border-color / box-shadow 会被静默吃掉。
+     ⭐ 这里只能改**自定义属性**（如上面这组 `--card-bg`）：自定义属性按 layer 比，
+       没有无 layer 的竞争者，所以在本层里照样生效。 */
+
+  /* 全局模糊开关：按钮磨砂放在自身会淡入淡出的外层 .floating-btn 上
+     （任务栏式）。元素自身的 opacity<1 不会挡掉它自己的 backdrop-filter
+     （backdrop root 只作用于后代），因此淡入淡出时磨砂始终存在、不闪失；
+     内层 .btn-card 透明以露出外层的磨砂面。
+     透明模式的配色覆写在上方"卡片磨砂"选择器里；非透明模式保持固定值 */
+  body.navbar-blur-enabled .floating-btn {
+    background-color: rgb(255 255 255 / 0.62);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
+  }
+
+  :root.dark body.navbar-blur-enabled .floating-btn {
+    background-color: rgb(0 0 0 / 0.65);
+  }
+
+  body.navbar-blur-enabled .floating-btn .btn-card {
+    background-color: transparent !important;
+  }
+
+  /* 目录弹窗卡片随「高级材质」磨砂（同悬浮按钮/浮层面板）。弹窗淡入淡出
+     动画发生在卡片自身 opacity 上，不形成 backdrop root，磨砂不闪失；
+     全屏透明模式下由上方的 .card-base 卡片磨砂选择器覆盖（含卡片透明度） */
+  body.navbar-blur-enabled .toc-popup-card {
+    background-color: rgb(255 255 255 / 0.62) !important;
+    -webkit-backdrop-filter: saturate(180%) blur(20px) !important;
+    backdrop-filter: saturate(180%) blur(20px) !important;
+  }
+
+  :root.dark body.navbar-blur-enabled .toc-popup-card {
+    background-color: rgb(0 0 0 / 0.65) !important;
+  }
+
+  .navbar-hidden {
+    @apply -translate-y-[4.5rem] pointer-events-none;
+  }
+
+  /* 触控设备子菜单展开 */
+  .group.submenu-open > .submenu-panel {
+    opacity: 1 !important;
+    /* 收起态靠 opacity:0 隐藏时，面板内链接仍可被 Tab 聚焦（键盘用户会跳进看不见的菜单），
+       故收起时同时用 invisible，展开态在此恢复可见 */
+    visibility: visible !important;
+    pointer-events: auto !important;
+    translate: none !important;
+  }
+
+  /* 触控设备子菜单展开时箭头旋转 */
+  .group.submenu-open > a span[class*="expand-more"] {
+    rotate: 180deg;
+  }
+
+  /* PC 端隐藏触控专属元素（概览链接等） */
+  @media (pointer: fine) {
+    .touch-only {
+      display: none !important;
+    }
+  }
+
+  /* 深浅色面板间隙桥接：overflow:visible 避免裁切，pointer-events 继承 group-hover 状态 */
+  #light-dark-panel {
+    overflow: visible !important;
+  }
+  #light-dark-panel::before {
+    content: "";
+    position: absolute;
+    top: -1.25rem;
+    left: 0;
+    right: 0;
+    height: 1.25rem;
+    background: transparent;
+  }
+
+  .link-underline {
+    @apply underline decoration-2 decoration-dashed underline-offset-4 transition;
+    text-decoration-color: var(--link-underline);
+  }
+
+  .link-underline:hover {
+    text-decoration-color: var(--link-hover);
+  }
+
+  .link-underline:active {
+    text-decoration-color: var(--link-active);
+  }
+
+  /* 高级材质开启：导航栏模糊（同 submenu-panel / floating-btn，由
+     body.navbar-blur-enabled 单一控制——后台关闭或访客关闭都会移除该 class，
+     保证菜单栏与二级面板/悬浮按钮行为一致） */
+  body.navbar-blur-enabled .navbar-blur {
+    transition: none !important;
+    background-color: rgb(255 255 255 / 0.62) !important;
+    -webkit-backdrop-filter: saturate(180%) blur(20px) !important;
+    backdrop-filter: saturate(180%) blur(20px) !important;
+    box-shadow: 0 4px 24px 0 rgb(0 0 0 / 0.04);
+    border-bottom: 1px solid rgb(0 0 0 / 0.06);
+  }
+
+  :root.dark body.navbar-blur-enabled .navbar-blur {
+    background-color: rgb(0 0 0 / 0.65) !important;
+    -webkit-backdrop-filter: saturate(180%) blur(20px) !important;
+    backdrop-filter: saturate(180%) blur(20px) !important;
+    box-shadow: 0 4px 24px 0 rgb(0 0 0 / 0.2);
+    border-bottom: 1px solid rgb(255 255 255 / 0.08);
+  }
+
+  /* 高级材质关闭：navbar-blur 类恒挂载，退回纯色卡片背景 */
+  body:not(.navbar-blur-enabled) .navbar-blur {
+    background-color: var(--card-bg) !important;
+  }
+
+  .submenu-panel {
+    /* navbar_blur 关闭：纯色背景，无模糊 */
+    background-color: var(--card-bg) !important;
+    transition:
+      opacity 150ms cubic-bezier(0.4, 0, 0.2, 1),
+      translate 150ms cubic-bezier(0.4, 0, 0.2, 1),
+      /* 收起用 invisible（阻止隐藏链接被 Tab 聚焦），visibility 参与过渡才能保留淡出 */
+        visibility 150ms cubic-bezier(0.4, 0, 0.2, 1) !important;
+  }
+
+  /* 伪元素桥接 mt-5 间隙，防止鼠标穿过间隙时 group-hover 丢失 */
+  .submenu-panel::before {
+    content: "";
+    position: absolute;
+    top: -1.25rem;
+    left: 0;
+    right: 0;
+    height: 1.25rem;
+    background: transparent;
+  }
+
+  :root.dark .submenu-panel {
+    background-color: var(--card-bg) !important;
+  }
+
+  /* navbar_blur 开启 */
+  body.navbar-blur-enabled .submenu-panel {
+    background-color: rgb(255 255 255 / 0.62) !important;
+    -webkit-backdrop-filter: saturate(180%) blur(20px) !important;
+    backdrop-filter: saturate(180%) blur(20px) !important;
+  }
+
+  :root.dark body.navbar-blur-enabled .submenu-panel {
+    background-color: rgb(0 0 0 / 0.65) !important;
+    -webkit-backdrop-filter: saturate(180%) blur(20px) !important;
+    backdrop-filter: saturate(180%) blur(20px) !important;
+  }
+
+  #navbar-wrapper.backdrop-blur-lg {
+    -webkit-backdrop-filter: blur(16px) !important;
+    backdrop-filter: blur(16px) !important;
+    border-radius: 0 0 var(--radius-large) var(--radius-large);
+  }
+
+  /* 菜单项图标（菜单项元数据 icon，AnnotationSetting 定义，内联 SVG）：
+     保存的 SVG 自带固定 width/height 与 currentColor，此处以 CSS 覆盖尺寸，
+     统一跟随菜单文字字号与颜色（hover 变主题色时图标同步变色） */
+  .nav-menu-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+
+  .nav-menu-icon svg,
+  .nav-menu-icon img {
+    width: 1.1em;
+    height: 1.1em;
+  }
+
+  .nav-menu-icon-lg svg,
+  .nav-menu-icon-lg img {
+    width: 1.25em;
+    height: 1.25em;
+  }
+
+  .nav-menu-icon img {
+    object-fit: contain;
+  }
+
+  /* 菜单栏自定义 Logo：等比缩放 + 垂直居中（尺寸由模板 Tailwind 类控制） */
+  .navbar-logo {
+    display: inline-block;
+    vertical-align: middle;
+  }
+
+  /* 桌面端导航栏菜单图标：小屏隐藏（只留文字，避免导航栏拥挤） */
+  @media (max-width: 1279px) {
+    .navbar-icon {
+      display: none !important;
+    }
+  }
+
+  /* ── 移动端抽屉菜单（NavMenuPanel）──
+     结构完全复刻外链跳转模态框（#ext-link-modal / #ext-link-backdrop）：
+     root 是 fixed 全屏容器，遮罩用 absolute + backdrop-filter（不是 fixed），
+     面板 absolute 定位于容器内。整个 root 由 navbar.js 动态 append 到 body
+     直接子级（模态框同款），脱离 OverlayScrollbars 滚动容器与 navbar 的
+     backdrop-filter 合成层，保证模糊按真实视口采样、与滚动位置一致。
+     开关由 body.nav-menu-open 驱动。 */
+  #nav-menu-root {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    pointer-events: none;
+  }
+
+  #nav-menu-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgb(0 0 0 / 0.4);
+    -webkit-backdrop-filter: blur(8px);
+    backdrop-filter: blur(8px);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--dur-swup, 200ms) cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  body.nav-menu-open #nav-menu-overlay {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* 注：以下抽屉规则全部限定在 #nav-menu-root 内，避免误作用于手风琴模式
+     （手风琴面板 id 也是 nav-menu-panel，若不加限定会被抽屉的默认隐藏样式
+      opacity:0/translate:110% 命中，导致手风琴点开无反应） */
+  #nav-menu-root #nav-menu-panel {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    bottom: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    width: 20rem;
+    max-width: calc(100vw - 1rem);
+    overflow: hidden;
+    border-radius: var(--radius-large);
+    background-color: var(--card-bg);
+    box-shadow: 0 20px 50px rgb(0 0 0 / 0.2);
+    translate: 110% 0;
+    opacity: 0;
+    pointer-events: none;
+    transition:
+      translate var(--dur-swup, 200ms) cubic-bezier(0.4, 0, 0.2, 1),
+      opacity var(--dur-swup, 200ms) cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  :root.dark #nav-menu-root #nav-menu-panel {
+    box-shadow: 0 20px 50px rgb(0 0 0 / 0.5);
+  }
+
+  /* 注：抽屉背景固定为不透明 var(--card-bg)（见上方主规则），
+     不再套用 navbar_blur 磨砂——避免与遮罩模糊叠加造成"双层模糊"过度透明 */
+
+  body.nav-menu-open #nav-menu-root #nav-menu-panel {
+    translate: 0 0;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* 抽屉内部布局：头部 + 可滚动菜单区 */
+  #nav-menu-root #nav-menu-panel .nav-drawer-header {
+    flex-shrink: 0;
+  }
+
+  #nav-menu-root #nav-menu-panel .nav-drawer-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  /* 菜单链接：一级项与组内项同级显示（二级不缩进）；
+     左内边距与左侧高亮竖线间距对称（竖线 left 0.5rem 距边缘 + 竖线宽 3px +
+     0.5rem 距文字 = 文字起始 1.1875rem，两侧均为 8px）；
+     active 按压内凹（轻微缩放下沉）；
+     hover 动效参考分类小组件：背景变浅 + 左内边距增大（位移感）+ 文字变主题色 */
+  .nav-drawer-link {
+    @apply relative flex items-center justify-between gap-3 rounded-lg pl-[1.1875rem] pr-3 py-2.5 font-bold text-black/75 transition-all hover:bg-(--btn-plain-bg-hover) hover:pl-[1.375rem] hover:text-(--primary) active:scale-[0.97] active:bg-(--btn-plain-bg-active) dark:text-white/75 dark:hover:text-(--primary);
+  }
+
+  /* 打开抽屉时菜单项从右往左淡入：由 navbar.js 在打开瞬间为每个
+     .nav-drawer-link 设置递增 animation-delay，配合本动画逐项浮现；
+     仅作用于 drawer 打开态 */
+  @keyframes nav-menu-link-in {
+    from {
+      opacity: 0;
+      translate: 8px 0;
+    }
+    to {
+      opacity: 1;
+      translate: 0 0;
+    }
+  }
+
+  body.nav-menu-open #nav-menu-root #nav-menu-panel .nav-drawer-link {
+    animation: nav-menu-link-in var(--dur-entry, 300ms)
+      cubic-bezier(0.4, 0, 0.2, 1) backwards;
+  }
+
+  /* 组间分割线：仅在抽屉内生效 */
+  #nav-menu-root #nav-menu-panel .nav-drawer-divider {
+    margin-left: 0.75rem;
+    margin-right: 0.75rem;
+  }
+
+  /* 当前页高亮：主题色淡背景 + 主题色文字 + 左侧主题色竖线装饰 */
+  .nav-drawer-link.nav-drawer-link-active {
+    background: color-mix(in oklab, var(--primary) 12%, transparent);
+    color: var(--primary);
+  }
+
+  .nav-drawer-link.nav-drawer-link-active::before {
+    content: "";
+    position: absolute;
+    left: 0.5rem;
+    top: 50%;
+    translate: 0 -50%;
+    width: 3px;
+    height: 40%;
+    border-radius: 999px;
+    background: var(--primary);
+    transition: left 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  /* hover 时文字随 pl 右移（1.1875rem → 1.375rem，增量 3px），
+     竖线同步右移 3px（0.5rem → 0.6875rem），保持相对位置 */
+  .nav-drawer-link.nav-drawer-link-active:hover::before {
+    left: 0.6875rem;
+  }
+
+  .nav-drawer-link.nav-drawer-link-active:hover {
+    background: color-mix(in oklab, var(--primary) 18%, transparent);
+  }
+  /* 注：抽屉打开时的滚动锁定由 navbar.js 内联管理（模态框同款，仅
+     body overflow hidden），无 CSS 版本 */
+
+  /* 抽屉打开时隐藏右下角浮动按钮（回顶/首页/评论/自定义）：
+     它们 z-index 999 高于抽屉，会遮挡抽屉右下角；滚动锁定后回顶按钮
+     虽会收起，但首页/评论/自定义按钮仍显示，故统一隐藏 */
+  body.nav-menu-open .floating-controls {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--dur-swup, 200ms) ease;
+  }
+
+  /* 桌面端（≥1024px / lg）不使用抽屉，防止跨断点残留；
+     平板（md~lg）与移动端共用抽屉菜单 */
+  @media (min-width: 1024px) {
+    #nav-menu-root #nav-menu-overlay,
+    #nav-menu-root #nav-menu-panel {
+      display: none !important;
+    }
+  }
+
+  /* 文章摘要 */
+  .summary-box {
+    @apply relative mb-5 overflow-hidden rounded-xl;
+    background: linear-gradient(
+      135deg,
+      color-mix(in oklab, var(--primary) 5%, var(--card-bg)),
+      var(--card-bg)
+    );
+    border: 1px solid color-mix(in oklab, var(--primary) 15%, transparent);
+  }
+
+  .summary-header {
+    @apply flex items-center gap-2 px-5 pt-4 pb-1 text-sm font-semibold;
+    color: var(--primary);
+  }
+
+  .summary-icon {
+    @apply text-lg;
+  }
+
+  .summary-content {
+    @apply px-5 pb-4 pt-4 text-sm leading-relaxed;
+    color: var(--deep-text);
+  }
+
+  .summary-header + .summary-content {
+    @apply pt-1;
+  }
+
+  /* 打字机光标 */
+  .summary-caret {
+    @apply font-bold;
+    color: var(--primary);
+    animation: caret-blink 0.8s step-end infinite;
+  }
+
+  @keyframes caret-blink {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0;
+    }
+  }
+
+  /* 点赞失败提示：upvote.js / post-like.js 失败回滚时临时添加该 class，1.2s 后由 JS 移除。
+     抖动 + 红色，用于无文案提示（避免新增 i18n 键）；
+     !important 用于压过按钮的 hover:text-(--primary)，且不依赖 Tailwind 类名扫描；
+     颜色引用 variables.css 的 --upvote-error */
+  .upvote-failed {
+    color: var(--upvote-error) !important;
+    animation: upvote-failed-shake 0.4s;
+  }
+
+  @keyframes upvote-failed-shake {
+    0%,
+    100% {
+      transform: translateX(0);
+    }
+    25% {
+      transform: translateX(-4px);
+    }
+    75% {
+      transform: translateX(4px);
+    }
+  }
+
+  /* ── 在线状态图标微动效（Profile 昵称右侧）──
+     仅使用 transform / opacity，保证 GPU 加速与低开销；
+     各状态语义：太阳慢转(在线)、火苗摇曳(忙碌)、禁行浮动(勿扰)、月亮呼吸(睡觉)、云朵漂浮(离开) */
+  .status-spin {
+    animation: status-spin 8s linear infinite;
+  }
+
+  .status-wiggle {
+    animation: status-wiggle 2.4s ease-in-out infinite;
+  }
+
+  .status-float {
+    animation: status-float 3s ease-in-out infinite;
+  }
+
+  .status-pulse {
+    animation: status-pulse 3.5s ease-in-out infinite;
+  }
+
+  .status-drift {
+    animation: status-drift 6s ease-in-out infinite;
+  }
+
+  @keyframes status-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  @keyframes status-wiggle {
+    0%,
+    100% {
+      transform: translateY(0) rotate(-4deg);
+    }
+    50% {
+      transform: translateY(-1.5px) rotate(4deg);
+    }
+  }
+
+  @keyframes status-float {
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(-2px);
+    }
+  }
+
+  @keyframes status-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.6;
+    }
+  }
+
+  @keyframes status-drift {
+    0%,
+    100% {
+      transform: translateX(0);
+    }
+    50% {
+      transform: translateX(3px);
+    }
+  }
+
+  /* 用户系统开启"减少动态效果"时禁用状态图标动画 */
+  @media (prefers-reduced-motion: reduce) {
+    .status-spin,
+    .status-wiggle,
+    .status-float,
+    .status-pulse,
+    .status-drift {
+      animation: none;
+    }
+  }
+}
+
+/* TOC 目录项样式 - 仅三栏布局生效 */
+.layout-three-column [data-toc-entry] {
+  padding-left: 0.75rem !important;
+  padding-right: 0.75rem !important;
+}
+
+/* TOC 目录项活动标题颜色 - 二栏/三栏一致 */
+.layout-two-column [data-toc-entry].visible .toc-title {
+  color: var(--primary) !important;
+}
+
+/* 三栏布局 active-indicator 与目录条目同宽（条目左右各内缩 0.75rem，
+   避免虚线框占满整个小组件宽度而比标题高亮更宽） */
+.layout-three-column #active-indicator {
+  left: 0.75rem !important;
+  right: 0.75rem !important;
+}
+
+.layout-three-column [data-toc-entry].visible .toc-title {
+  color: var(--primary) !important;
+}
+
+/* 当前小节的标记（序号数字 / 子级圆点）一并点亮 —— 原先只有标题变色，
+   数字还留在灰档位上，跟「当前位置」这件事是脱节的 */
+[data-toc-entry].visible .toc-marker {
+  color: var(--primary) !important;
+}
+
+[data-toc-entry].visible .toc-dot {
+  background-color: var(--primary) !important;
+}
+
+/* TOC 目录项 hover 动效 - 文字变主题色 */
+[data-toc-entry]:hover .toc-title {
+  color: var(--primary);
+  transition: color var(--toc-transition-duration) ease;
+}
+
+/* 三栏 TOC hover 左内边距增加（覆盖 px-2 被 !important 重写的 padding） */
+.layout-three-column [data-toc-entry]:hover {
+  padding-left: 1.25rem !important;
+}
+
+/* 三栏布局下友情链接一行2个 - 通过 th:classappend 在 friends.astro 中控制 */
+
+/* 瞬间动态内容样式 */
+.moment-feed-content :where(p) {
+  margin-top: 0.35rem;
+  margin-bottom: 0.35rem;
+}
+
+.moment-feed-content :where(a) {
+  font-weight: 600;
+}
+
+/* Moment 插件会把正文中的 #标签渲染为 a.tag；标签列表已在内容末尾统一输出，正文内隐藏避免重复。 */
+.moment-feed-content :where(a.tag) {
+  display: none;
+}
+
+/* ===== 瞬间媒体区：朋友圈式布局（MomentMedia.astro，moments / moment 两页共用） =====
+   - 单图（moment-media-count-1）：等比完整展示，高度上限 18rem；
+     仅超长图裁下方、超宽图裁右侧（阈值见下方单图规则）
+   - 多图（moment-media-count-N，N>=2）：统一 1:1 方形宫格 cover 裁剪，
+     2/4 张为两列、其余为三列（朋友圈式，行尾不满自然左对齐）
+   - 非 PHOTO 媒体（视频/音频/引用链接，.moment-media-nonphoto）独占整行，不裁剪
+   mediaCount 由模板 th:classappend 注入的 moment-media-count-N 类驱动。 */
+.moment-media {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.625rem;
+  width: 100%;
+  max-width: min(100%, 36rem);
+}
+
+.moment-media-item {
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  border-radius: 0.75rem;
+  background: var(--btn-regular-bg);
+}
+
+.moment-media-item img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: var(--btn-regular-bg);
+}
+
+/* 2 张 / 4 张：两列宫格（2 张并排各半宽、4 张 2x2） */
+.moment-media-count-2,
+.moment-media-count-4 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* 单图：统一展示高度、宽度跟随图片比例，容器收缩包裹图片（左对齐、无留白底色） */
+.moment-media-count-1 {
+  grid-template-columns: 1fr;
+  max-width: min(100%, 30rem);
+}
+
+.moment-media-count-1 .moment-media-item {
+  aspect-ratio: auto;
+  width: fit-content;
+  justify-self: start;
+  background: transparent;
+}
+
+/* 单图：宽度撑满容器、高度受 18rem 上限约束（替换元素约束算法自动等比求解）。
+   不要用 height + max-width 组合：宽度被钳制后盒子比例会偏离图片原比例，基类
+   object-fit: cover 会裁掉两侧，导致 PhotoSwipe 过渡起点与预览不一致。
+   兜底阈值（裁切临界高宽比 = 18rem / min-width）：
+   - min-width 10rem → 高宽比 > 1.8 才裁下方并展示顶部，即 9:19 及以上的手机长截图
+     算长图；3:4 / 2:3 / 9:16 等普通竖图保持完整，不被误判为长图；
+   - min-height 10rem → 宽高比 > 3:1 的超宽图才裁右侧（16:9、21:9 不受影响）。
+   object-position: left top 保证裁切后展示的是图片起始区域（长图顶部 / 宽图左侧）。
+   坑：min-width 不能写成 min(10rem, 100%)——父级是 width: fit-content，百分比会
+   与之循环依赖而被浏览器丢弃，超长图会缩成 81px 细条且不裁切。 */
+.moment-media-count-1 .moment-media-item img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 18rem;
+  min-width: 10rem;
+  min-height: 10rem;
+  object-fit: cover;
+  object-position: left top;
+}
+
+/* 视频/音频/引用链接：独占整行完整展示 */
+.moment-media-nonphoto {
+  grid-column: 1 / -1;
+  width: 100%;
+}
+
+/* 音频播放器无需占满整行宽度 */
+audio.moment-media-nonphoto {
+  max-width: 32rem;
+}
+
+/* 单图「长图 / 宽图」徽章：仅当图片被裁切显示时提示（长图裁下、宽图裁右），
+   默认由模板的 hidden 属性隐藏，由 moment-media-badge.js 判定后显示 */
+.moment-media-badge {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.5rem;
+  border-radius: 0.375rem;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 0.125rem 0.375rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1.25;
+  color: #fff;
+  pointer-events: none;
+}
+
+.moment-media-badge[hidden] {
+  display: none;
+}
+
+/* PhotoSwipe 打开/关闭动画期间：缩略图复位（清除 hover 放大的 transform 与过渡），
+   保证 zoom 过渡采样到真实的缩略图矩形（由 content-photoswipe.ts 切换 body 类）。
+   !important 用于覆盖模板上的 Tailwind hover 放大工具类（位于 utilities 层） */
+body.pswp-transition .moment-media img,
+body.pswp-transition .custom-md img,
+body.pswp-transition #post-cover img,
+body.pswp-transition #photo-detail-image {
+  transform: none !important;
+  transition: none !important;
+}
+
+/* 朋友圈动态列表 - JS 手动两列瀑布流（桌面两列 / 移动单列）。
+   ⚠️ 不用 CSS columns 的 balance 做最终方案：它按 DOM 顺序「连续分段」，
+   加载更多时新增内容（DOM 顺序靠后）会全部堆到右列、左列不动（用户反馈
+   「只加载右边的」）。columns 仅作「首帧无闪烁兜底」——JS 执行前首帧即按
+   columns 双栏渲染（避免「先单栏后双栏」的 FOUC），JS 就绪后加 .masonry-active
+   切换为 flex 两列 + 「最短列优先」瀑布流（friends.bundle.js，对齐首页
+   post-list-layout 的 masonry 算法），加载更多时新内容增量分散两列、不重排。 */
+.friends-timeline {
+  column-count: 1;
+  column-gap: 1rem;
+}
+@media (min-width: 768px) {
+  .friends-timeline {
+    column-count: 2;
+  }
+}
+/* columns 布局下每组（日期头 + 卡片）不可被分到两列（首帧兜底用） */
+.friends-timeline-group {
+  display: block;
+  break-inside: avoid;
+}
+
+/* JS 双栏瀑布流：display:flex 覆盖 columns 多列布局 */
+.friends-timeline.masonry-active {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.friends-timeline-column {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+/* 移动端：即使 JS 启用双栏也保持单列 */
+@media (max-width: 767.98px) {
+  .friends-timeline.masonry-active {
+    flex-direction: column;
+  }
+}
+
+/* 日期分组头：左色条 + 日历图标 + 日期，列内紧凑样式 */
+.friends-timeline-date {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+  padding-left: 0.5rem;
+  border-left: 3px solid var(--primary);
+  color: var(--primary);
+  font-size: 0.8125rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+}
+
+/* 卡片容器：masonry item 子层，块级即可；卡片自身撑满列宽 */
+.friends-timeline-row {
+  display: block;
+}
+
+/* 卡片悬浮上移 + 主题色阴影（受样式开关控制）。
+   移动端（<768px）卡片连排不分块，屏蔽悬浮上移；md+ 保留 */
+@media (min-width: 768px) {
+  body.card-hover-lift-enabled .card-hover-lift:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 4px 20px color-mix(in oklab, var(--primary) 20%, transparent);
+  }
+}
+
+/* 头像 hover 微交互 */
+.friends-avatar {
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.friends-card:hover .friends-avatar {
+  transform: scale(1.08);
+}
+
+/* 来源链接 - 轻量文字样式 */
+.friends-source-link {
+  position: relative;
+  transition: color 0.15s ease;
+}
+
+/* 同博主多篇文章分隔线 */
+.friends-article-separator {
+  height: 1px;
+  background: var(--line-color);
+  margin: 0.75rem 0;
+}
+
+/* 同博主文章条目（分组后追加的） */
+.friends-article-item .friends-article-time {
+  margin-bottom: 0.125rem;
+}
+
+/* 随机钓鱼（鱼钩）按钮：点击后鱼钩图标左右摇摆，模拟鱼咬钩晃动。
+   全局定义，供导航栏与朋友圈页共用（对齐参考版 1.1.36） */
+.random-fish-btn.spinning .random-fish-icon {
+  animation: random-fish-swing var(--swing-duration, 0.5s) ease-in-out infinite
+    alternate;
+  /* 顶部为轴心，像挂在鱼线上，钩尖（下方）晃动 */
+  transform-origin: top;
+}
+@keyframes random-fish-swing {
+  from {
+    transform: rotate(-20deg);
+  }
+  to {
+    transform: rotate(20deg);
+  }
+}
+
+/* 随机钓鱼跳转遮罩：「正在前往神秘区域」
+   毛玻璃柔光卡片 + 主色星芒，契合 Ethereal 空灵主题；SPA 导航期间显示 */
+.random-fish-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in oklab, var(--page-bg) 72%, transparent);
+  backdrop-filter: blur(8px) saturate(1.1);
+  -webkit-backdrop-filter: blur(8px) saturate(1.1);
+  opacity: 0;
+  transition: opacity 0.35s ease;
+}
+.random-fish-overlay.show {
+  opacity: 1;
+}
+.random-fish-overlay-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 1.6rem 2.2rem;
+  border-radius: var(--radius-large);
+  background: color-mix(in oklab, var(--card-bg) 92%, transparent);
+  border: 1px solid color-mix(in oklab, var(--primary) 18%, transparent);
+  box-shadow: 0 12px 44px -12px rgba(0, 0, 0, 0.28);
+  animation: fish-overlay-in 0.4s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.random-fish-overlay-icon {
+  color: var(--primary);
+}
+.random-fish-overlay-text {
+  font-size: 0.9rem;
+  letter-spacing: 0.12em;
+  color: var(--primary);
+}
+@keyframes fish-overlay-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 最近评论小组件跳转落位：评论区高亮脉冲（过渡动画，明确标示落点）。
+   用 outline 环 + 背景淡色脉冲，不破坏 .card-base 原有 box-shadow。 */
+#comment {
+  scroll-margin-top: calc(var(--navbar-height, 4rem) + 1rem);
+  /* comment-next 1.0.6+ 的单条评论锚点用它做 scroll-margin-top（默认 5rem），
+     这里对齐评论区自身的偏移，避免 navbar 盖住目标评论。变量可继承到内部
+     的 .comment-next-comment-item，故设在 #comment 上即可。 */
+  --comment-next-anchor-offset: calc(var(--navbar-height, 4rem) + 1rem);
+}
+/* 不限定 #comment：精准锚点时高亮的是单条评论元素（.comment-next-comment-item），
+   插件只负责滚动、不做高亮，由 comment-locate.ts 补上这个 class。
+   1.3.46：动画改为「快速出现 → 保持 → 淡出」的 1.6s hold 脉冲（原 0.9s 单次
+   outline 脉冲在长文滚动途中就播完，用户滚到位时看不见），环色/底色适度加强。 */
+.comment-locate-flash {
+  outline-offset: 2px;
+  border-radius: 0.5rem;
+  animation: comment-locate-flash 1.6s ease-out;
+}
+@keyframes comment-locate-flash {
+  0% {
+    outline: 0 solid transparent;
+    background-color: transparent;
+  }
+  12% {
+    outline: 3px solid color-mix(in oklab, var(--primary) 60%, transparent);
+    background-color: color-mix(in oklab, var(--primary) 18%, transparent);
+  }
+  70% {
+    outline: 3px solid color-mix(in oklab, var(--primary) 60%, transparent);
+    background-color: color-mix(in oklab, var(--primary) 18%, transparent);
+  }
+  100% {
+    outline: 0 solid transparent;
+    background-color: transparent;
+  }
+}
+
+/* 落位等待期的加载提示：评论区是懒加载的，锚点进入后从激活到评论渲染可能要
+   1-2 秒。这期间只滚到一个「评论」标题壳子上会很像卡住了，给个低调提示。
+   class 由 comment-locate.ts 临时加，内容就绪（comment:ready）后自动移除。 */
+#comment.comment-locating #comment-lazy-placeholder::before {
+  content: "评论加载中…";
+  display: block;
+  padding: 1.5rem 0;
+  text-align: center;
+  font-size: 0.75rem;
+  line-height: 1.6;
+  color: #9ca3af;
+}

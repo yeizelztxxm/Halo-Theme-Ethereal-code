@@ -1,0 +1,57 @@
+# build output
+dist/
+# 根目录构建产物（zip 由 CI artifact / GitHub Release 提供）
+/*.zip
+# 生成产物：由 scripts/convert-readme.mjs 从 README.md 转换（Halo 应用市场用），勿手改
+/README-Halo.md
+# generated types
+.astro/
+
+# 经典脚本编译产物（源码在 src/scripts/assets/ 与 src/scripts/vendor/，
+# 构建时由 build-assets integration 生成，见 AGENTS.md「经典脚本资产管线」）
+public/assets/*.js
+
+# dependencies
+node_modules/
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+
+# environment variables
+.env
+.env.production
+
+# macOS-specific files
+.DS_Store
+
+# jetbrains setting folder
+.idea/
+
+# codebuddy
+.codebuddy/
+
+# ThRenderProbe / ThExpressionCheck 的 classpath（11 个 jar ≈ 5MB 二进制）
+# 用 `node scripts/tools/fetch-lib.mjs` 重建，不进仓库
+scripts/tools/lib/
+
+templates/
+
+# opencode 工具配置
+.opencode/
+
+# 文档
+docs/
+
+# WorkBuddy 工具目录（本地态，勿提交）
+.workbuddy/
+
+# 临时快照（勿提交；也会被 Tailwind 内容扫描到 -> 徒增无用 CSS）
+.tmp_*.html
+
+# 临时侦察物：参考站样式/HTML 摘录、语法检查副本（勿提交，勿让 Tailwind 扫到）
+.tmp_ref/
+.tmp_check/

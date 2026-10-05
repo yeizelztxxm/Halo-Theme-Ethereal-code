@@ -1,0 +1,1176 @@
+# Changelog
+
+本文件按版本记录 Ethereal 主题的变更历史。
+
+## [v1.3.70] - 2026-09-07
+
+### 代码块骨架屏：加载期间显示占位骨架，消除「空白等待」观感
+
+前两版（1.3.68/1.3.69）已分别解决「黑闪」（`:not(:defined)` 失效改无条件隐藏）与「渲染慢」（预热 shiki 懒加载链）。但实测发现：halo 高亮完成前，外部 `<pre>` 被 `visibility:hidden` 后留下的是**空白块**——正文已渲染完、代码块区域却是一块透明占位，观感上仍是「代码块渲染最慢」。
+
+**方案**（`src/styles/markdown.css`）：把外部 `<pre>` 直接当骨架占位——
+
+| 手段                                                                                              | 作用                                                                              |
+| ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| 覆盖 `.custom-md pre` 深色 `--codeblock-bg` 为中性骨架底色 `color-mix(codeblock-bg 16%, card-bg)` | 消除黑闪，亮色≈浅灰（贴近 github-light 终态）、暗色≈深灰（贴近 github-dark 终态） |
+| `background-image` 加 `linear-gradient` + `background-position` 扫光动画                          | shimmer 骨架扫光，明确「加载中」信号                                              |
+| `visibility:hidden` 藏掉 `pre > code` 原始文本                                                    | 文字不可见但保留占位高度，不塌布局                                                |
+
+**为何不用 `:has()`/JS 判「完成」**：halo 在 `process()` 的 `finally` 块（成功/失败都执行）会把外部 pre 设 `display:none !important`——pre 自身的 `display:none` 就自动让骨架消失、shadow DOM 高亮内容同帧接管，天然「骨架 → 内容」平滑过渡，无需额外检测逻辑。
+
+- pre 的 `rounded-xl` 自动给骨架裁出圆角，无需额外 radius/overflow
+- 加载完成 pre 变 `display:none` → 骨架动画随元素停止，零 CPU 残留
+
+## [v1.3.69] - 2026-09-07
+
+### 预热 halo shiki 高亮模块，加速文章代码块渲染
+
+用户反馈「文章其他地方都渲染完，代码块渲染最慢」。实地测量（Playwright Performance Resource Timing）发现根因是 **halo shiki 插件的懒加载链**：
+
+| 资源                                         | 大小          | 开始下载时间   | 说明                                                                |
+| -------------------------------------------- | ------------- | -------------- | ------------------------------------------------------------------- |
+| `shiki-code.js`                              | 52KB          | 224ms          | `<script type="module">`（deferred），DOMContentLoaded 前 define    |
+| `highlighter-*.js`                           | **183KB**     | **803ms**      | 动态 `import("...")` 懒加载——**DOMContentLoaded(804ms) 之后才触发** |
+| `dist-*.js` / `transformer-*.js`             | 4.9KB / 2.7KB | 966ms / 1047ms | 动态 import 链                                                      |
+| `shellscript-*.js` / `yaml-*.js`（语言语法） | ~50KB / ~94KB | 1127ms         | 运行时按代码块语言加载                                              |
+| `material-theme-*.js`（主题）                | ~120KB        | 1126ms         | 运行时加载高亮主题                                                  |
+
+即：halo 后端 SSR 只输出 `<shiki-code><pre><code>纯文本</code></pre></shiki-code>`（无 token），高亮全在客户端异步跑，且高亮核心（highlighter 183KB）是**懒加载**——要等 `<shiki-code>` 元素升级渲染时才 `import("highlighter-*.js")`，导致代码块比正文晚 400~600ms 出现。
+
+**修法**（`src/layouts/Layout.astro` head 末尾）：加一段自适应内联脚本——找到 halo 注入的 `shiki-code.js` module script，`fetch` 其源码（命中浏览器缓存，几乎零成本），正则提取所有 `import("...")` 动态模块 URL，用 `<link rel="modulepreload">` 提前下载，让懒加载命中缓存。
+
+- 自适应：非文章页无 `shiki-code.js` 时直接 `return`，零副作用
+- 降级安全：正则不匹配（halo 升级改构建格式）/ fetch 失败时静默跳过，仅回退到原有懒加载行为
+- 预热范围含 highlighter + dist + transformer + 语言语法 + 主题，覆盖整条懒加载链
+
+## [v1.3.68] - 2026-09-07
+
+### 修复文章刷新瞬间代码块"黑闪"（1.3.67 的 :not(:defined) 选择器失效）
+
+**1.3.67 的 bug**：用 `.custom-md shiki-code:not(:defined) > pre { visibility: hidden }` 想在 halo shiki 升级前隐藏外部 `<pre>`。但实测（Playwright 抓 lqbby.com 文章页 `domcontentloaded` 后立即读 DOM）发现：
+
+- `customElements.get('shiki-code')` 已返回 class、`<shiki-code>.matches(':defined')` = **true**——**halo 的 `shiki-code.js` 是 `<script type="module">`（deferred），在 DOMContentLoaded 之前就执行了 `customElements.define("shiki-code")`**。
+- 因此首帧渲染时 `<shiki-code>` 已经是 `:defined`，`:not(:defined)` 选择器**永远匹配不到**，`visibility: hidden` 永不生效，外部 `<pre>` 仍以主题深色 `oklch(0.17)` 背景显示 = "黑闪"仍在。
+
+**真正的黑闪窗口**：`customElements.define` 同步完成后，Lit 的 render 是异步的——还要等 shiki 主题（github-light）fetch、高亮 token、渲染 shadow DOM，最后才 `setAttribute("style","display: none !important;")` 到外部 `<pre>`。这段 fetch 窗口里外部 pre 是 `display:block` + 深色 bg。
+
+**修法**：去掉 `:not(:defined)`，**无条件隐藏外部 `<pre>`**：
+
+```css
+.custom-md shiki-code > pre {
+  visibility: hidden;
+}
+```
+
+- halo render 完成后用 `display: none !important` 覆盖、shadow DOM 接管显示多色 token（外部 pre 本就该丢弃）
+- 用 `visibility: hidden`（非 `display: none`）让 pre 仍占布局，避免首帧代码块高度塌陷造成 layout shift
+- halo 升级失败时外部 pre 永久不可见——坏状态，权衡可接受
+
+## [v1.3.67] - 2026-09-07
+
+### 修复文章刷新瞬间代码块"黑闪"（1.3.66 修法错误，本次重新定位）
+
+**1.3.66 错诊断**：1.3.66 改的是 `.custom-md` / `#content-wrapper` 的 `onload-animation` opacity 渐显——但**真正根因不是这个**。
+
+**真正的根因**：halo 的 markdown 渲染器用 `<shiki-code>`（@halo-dev/richtext-editor 的 web component）包裹代码块。**halo 后端 SSR 直接输出 `<shiki-code>`**（curl 抓 HTML 确认 16 个 shiki-code 元素），**但 shiki 高亮在客户端异步跑**——F5 刷新时序：
+
+| 阶段               | `<shiki-code>` 状态                                                                                                   | 外部 `<pre>` 样式                                                                                                      | 视觉                                |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| t=0（HTML 解析完） | unknown element（halo shiki JS 还没加载）                                                                             | 主题 CSS 生效：`.custom-md pre { bg: --codeblock-bg: oklch(0.17); color: white }`——**深色背景 + 白字 + 无 token 颜色** | **「黑底白字模糊」**——这就是"黑闪"  |
+| t=200-500ms        | halo shiki JS 加载完，`<shiki-code>` 升级为 custom element，shadow DOM 接管，halo 客户端设 `display: none` 到外部 pre | shadow DOM 内部用 `light-theme="github-light"` 渲染：白底 + 多色 token                                                 | 稳态（`github-light` 白底黑字高亮） |
+
+**修法**（`src/styles/markdown.css` 末尾新增）：用 `:not(:defined)` 选中未升级的 `<shiki-code>`，把内部 `<pre>` 设为 `visibility: hidden`——彻底避开那段"黑底白字无 token"泄露窗口：
+
+```css
+.custom-md shiki-code:not(:defined) > pre {
+  visibility: hidden;
+}
+```
+
+- `shiki-code` 升级为 `:defined` 后，规则自动失效（halo 客户端设 `display: none` 接管）
+- halo 升级失败时本规则永久生效（pre 占布局但不可见——比"黑闪"温和）
+
+## [v1.3.66] - 2026-09-07
+
+### 修复文章刷新瞬间代码块"黑闪"
+
+修复「按 F5 / Ctrl+F5 直接刷新文章页时，代码块（`<pre>`）会从无到有闪一下黑底」的问题。
+
+**根因**：`.custom-md` 内容根带 `onload-animation`（`opacity: 0` + `fade-in-up` 300ms），其外层 `#content-wrapper` 也带 `onload-animation`。刷新瞬间正文从 `<template id="content-template">` 克隆入 DOM 后，整个内容树（连同深色代码块 `--codeblock-bg: oklch(0.17)`）做 300ms 的 opacity 渐显——深色背景从全透明渐显到 1，与亮色页面背景形成强烈对比，视觉上像一闪。
+
+**修法**（`src/styles/transition.css` 末尾新增）：对含 `.custom-md` 的 `#content-wrapper` 和 `.custom-md.onload-animation` 本身改用 `slide-in-up` 关键帧（在本主题里是 `0 0 → 0 0` 的 no-op）配合 `opacity: 1`，等价于"立即出现"——深色代码块不再做渐显，直接可见，消除"暗块从无到有"的视觉冲击。`#content-wrapper:has(.custom-md)` 只命中文章页，首页/归档页等其他页面的入场动画不受影响。
+
+## [v1.3.65] - 2026-09-07
+
+### 合并上游 v1.2.3 特性
+
+从上游 `AloneNanNan/Halo-Theme-Ethereal` v1.2.3 cherry-pick 4 个功能提交（保留本地 167 个定制提交，冲突点已按「本地定制优先 + 吸收上游新特性」原则手工解决）：
+
+- **正文表格适配主题样式并暴露 CSS 变量**（#67）：`markdown.css` 新增表格样式（本地从未改动该文件，干净落地），`variables.css` 暴露表格相关 CSS 变量。
+- **瞬间图片改朋友圈式布局**（#66）：新增 `MomentMedia.astro` 组件 + `moment-media-badge.ts` + `thumb-crop.ts`，单图等比展示（高度上限 18rem）、多图 1:1 方形宫格；修复非竖图裁切与灯箱过渡。**冲突解决**：删除本地 v1.3.61 的旧 `moments.astro` 内联正方形网格 `<style>`（模板已改用 `<MomentMedia />`，旧样式会覆盖上游朋友圈式布局），朋友圈式 CSS 统一收编进 `components.css`，保留本地「朋友圈瀑布流 JS 两列」的详细注释。
+- **菜单栏新增「显示网站名」开关**（#65）：`settings.yaml` 新增 `mobileMenu.showTitle`（默认开启），`SiteLogo`/`Navbar`/`config.ts` 联动，关闭后菜单栏只显示 Logo。
+- **项目集详情外链按钮统一为元信息链接样式与按压反馈**：`portfolio-detail.astro`、`PostMeta.astro`、`post-share.ts`。
+
+## [v1.3.64] - 2026-09-07
+
+### 优化 Halo 评论组件（comment-next）亮/暗色可见度
+
+修复「亮色模式下评论框（输入框）边框几乎看不见、`输入QQ邮箱自动获取昵称` 提示和表情反应计数等弱文字也偏淡」的问题。暗色同步校准避免边框过淡。
+
+根因：Halo comment-next web component 在初始化时把主题的 `--halo-cw-muted-1-color` 映射为评论框 `--comment-next-border-color`、把 `--halo-cw-muted-3-color` 映射为评论区 box 背景、把 `--halo-cw-text-3-color` 映射为占位符/弱文字。原 `--halo-cw-muted-1-color` 主题定义为极淡 muted 背景（`oklch(0.96 0.012)`），被当 border 在白卡片上亮度差仅 0.01、几乎不可见；`--halo-cw-text-3-color: rgb(0 0 0 / 0.5)` 在淡 input bg 上也偏淡。
+
+`src/styles/comment-widget.css`：
+
+- 亮色 oklch 块：`--halo-cw-muted-1-color: 0.96→0.78`（作 border，对比白卡 0.22 清晰）；`--halo-cw-muted-2-color: 0.92→0.68`（次级/hover）；`--halo-cw-muted-3-color: 0.86→0.93`（box bg 改浅更柔和）。
+- 暗色 `:root.dark` 块：muted-1 `#4e4e6a→#5a5a78`（暗卡亮度 0.23 vs 0.32 偏淡，加深到 0.38）；muted-3 改浅使 box bg 与 card-bg 有层次。
+- `:root` 块：`--halo-cw-text-3-color: 0.5→0.62`（占位符/弱文字可见度）；`--halo-cw-emoji-picker-color-border: 0.1→0.2`（emoji 面板与 input 边框）；fallback hex 同步。
+- 暗色 oklch 块 muted 数值与 hex 块对应调整，保持两套机制一致。
+
+## [v1.3.63] - 2026-09-07
+
+### 修复 content-widgets 组件在直接访问（刷新）文章页时不渲染、样式丢失
+
+修复「用 content-widgets 插件（acanyo，`xhhao-com-*` 标签）写的文章，Swup 换页进去样式正常，但直接访问 / 刷新文章页时组件不挂载、只显示原始文本」的问题。
+
+根因：插件在 `<head>` 注册 `DOMContentLoaded` 挂载（`querySelectorAll` 扫 `xhhao-com-*`），而主题 `post.astro` 的 `processAndInsert()` 同为 `DOMContentLoaded` 但注册更晚。CDN 图片处理模式下文章内容要等 `processAndInsert` 从 `<template id="content-template">` 克隆进占位符，故插件挂载先跑时正文还在模板里、扫不到任何组件。Swup 换页路径因插件脚本随容器重执行而正常。
+
+- `post.astro` `processAndInsert()` 在 `placeholder.replaceWith(contentEl); template.remove();` 之后补调 `window.XhhaoComContentWidgets.mount()`（有 `typeof` 守卫，插件未装/未就绪时安全跳过；插件 mount 幂等，已挂载元素带 `data-xhhao-com-mounted` 标记会跳过，不重复挂载）。
+
+## [v1.3.62] - 2026-09-07
+
+### 修复 CDN 图片处理模式下提示块不转换（直接访问文章页失效）
+
+修复「直接访问文章页时，`> [!NOTE]` / `[!TIP]` / `[!WARNING]` / `[!CAUTION]` 块引用不转换为彩色提示块、仍显示原始 `[!XXX]` 文本」的问题。
+
+根因：主题 `app.ts` 是 deferred module（`init()` 在 `DOMContentLoaded` 之前执行），而 `post.astro` 的内联 `processAndInsert()` 绑在 `DOMContentLoaded`，CDN 图像处理模式下文章内容要等 `DOMContentLoaded` 才从 `<template>` 克隆进占位符。于是 `initLegacyAdmonitions()` 同步执行时 `.custom-md` 还没进 DOM，块引用全找不到。Swup 换页路径不受影响（`page:view` 在新内容插入后才触发）。
+
+- `app.ts` init() 里的 `initLegacyAdmonitions()` 改为 `document.addEventListener("DOMContentLoaded", initLegacyAdmonitions)`，与 `processAndInsert` 同事件、注册晚于它，故内容先克隆、转换器后扫描。
+
+### content-widgets 插件暗色适配补丁
+
+修复 content-widgets（acanyo）插件组件在暗色模式下文字看不清（白底深字落深色背景）的问题。
+
+根因：插件自带暗色变量用 `:where(.dark,[data-color-scheme=dark],[data-theme=dark])` 定义，`:where()` 优先级为 0，被插件自己的 `:root`(0,1,0) 亮色变量压过，导致主题 `html.dark` 下组件仍用亮色配色。
+
+- `variables.css` 新增 `:root.dark` 高优先级（0,2,0）覆盖 `--xhhao-com-base-*` 暗色值（照搬插件官方暗色配色），并补 note 便签组件的暗色滤镜 `filter: brightness(.85) saturate(.9)`。其余 `--xhhao-com-*` 均 alias 到 base，自动跟随。
+
+## [v1.3.61] - 2026-09-06
+
+### 瞬间页图片网格统一为正方形
+
+修复瞬间（moments）页图片网格「图片大小不一」：`.moment-media-item` 同时设 `aspect-ratio: 3/4` 与 `max-height: 18rem`，导致 3/6 张图（span 2，占 1/3 宽）呈竖长 3:4、而 2/4/5 张图（span 3，占 1/2 宽）被 `max-height` 压成近正方形，同一瞬间内比例不一致。
+
+- `.moment-media-item` 统一 `aspect-ratio: 1/1`（微博九宫格正方形），去掉 `max-height: 18rem`。
+- `video.moment-media-item` 单独保持 `aspect-ratio: 16/9`，不被统一成正方形。
+- 单图（count-1）仍由 `max-height: 24rem` 限制，观感不变。
+
+## [v1.3.60] - 2026-09-06
+
+### 魔改组件设计语言对齐修复（暗色对比度 / 无效变量 / 硬编码）
+
+对魔改新增的弹窗、卡片、空状态与标签组件做交叉对比，找出脱离原设计语言处并做对齐修复（复用现有 token，不新增样式）：
+
+1. **主色底白字暗色反色**（`--primary` 恒为中亮色，白字亮暗均不达标，统一改用项目已有的 `--on-primary` 深色前景）：
+   - `post-share.ts` 分享弹窗「保存图片」、`external-link-modal.css` 外链「继续访问」、`link-apply-modal.css` 友链「提交」，`color:#fff` → `color:var(--on-primary)`。
+   - `tags.astro` 标签云数字徽章、`categories.astro` 分类胶囊 hover 态同样接入 `--on-primary`（分类胶囊亮色保留白字、暗色 `:root.dark` 反色）。
+2. **无效 `var(--text-50)` 修正**（`--text-50` 非 CSS 变量，恒回退 #999）：弹窗关闭按钮 ×4（`post-share.ts` / `post-reward.ts` / `link-apply-modal.css` / `profile-status.css`）→ `var(--deep-text)`；`portfolio-detail.astro` 引用块无回退声明 → `color-mix(var(--deep-text) 60%)`。
+3. **无效 `text-20` 类修正**（类不存在）：`friends.astro` / `photo.astro` / `schedule-calendar.astro` → `text-30`。
+4. **空状态对齐**：`timeline.astro` / `skills.astro` 筛选空状态硬编码黑/白 → `text-30`/`text-50`（与同页未配置空状态一致）；`moments.astro` 空状态补图标 + `py-16`。
+5. **卡片描边对齐**：`timeline.astro` / `skills.astro` 卡片 `border-black/10` → `btn-card-outline`（对齐朋友圈/说说主色描边）；`PostCard.astro` 分隔线 `dark:border-white/15` → `/10`。
+6. **弹窗层级/圆角对齐**：`external-link-modal.css` / `link-apply-modal.css` z-index `9999` → `99999`（对齐分享/打赏弹窗）；`post-share.ts` / `post-reward.ts` 弹窗 `--radius-large` 回退值 `20px` → `16px`。
+7. **标签交互对齐**：`tags.astro` 标签云 hover `scale+shadow` → 复用全局 `.tag-chip`（上浮+光晕）；`photo.astro` 标签 chip `rounded-lg` → `rounded-md`。
+
+## [v1.3.59] - 2026-09-06
+
+### UI/UX 专项审查修复：暗色对比度 + 硬编码 token 对齐 + 空状态
+
+对主题做全站 UI/UX 专项审查后，修复一批「暗色对比度崩坏 / 硬编码偏离 token / 空状态缺失」问题（均一两行局部对齐，复用现有 CSS 变量，不动架构）：
+
+1. **暗色对比度**（`--primary` 底色徽章漏 `dark:` 适配，暗色下白字几乎不可见）：
+   - `links.astro` 申请步骤序号、`bangumis.astro` 番剧状态徽章、`PopularPosts.astro` Top3 序号，统一补 `dark:text-black/70`（对齐 Pagination/FilterTab 的标准写法）。
+2. `post-reward.ts` 打赏文案 `var(--text-75,#666)` 引用了**不存在的变量**（只有 `.text-75` 类）→ 改 `var(--deep-text,#666)`。
+3. **空状态缺失**：`categories.astro` / `tags.astro` 分类胶囊墙/标签云为空时渲染空白卡片 → 补「暂无分类/暂无标签」提示（对齐 archives/bangumis 硬编码先例）。
+4. **硬编码 token 对齐**：
+   - `timeline.astro` 进行中绿色 `#22c55e` → 抽成语义变量 `--timeline-current`（variables.css，沿用 `--upvote-error` 先例）。
+   - `components.css` 摘要 `.summary-content` 暗色 `rgba(255,255,255,0.75)` 硬编码覆盖删除，统一走 `--deep-text`。
+   - `MusicPlayer.astro` 加载遮罩 `dark:bg-[#1e1e1e]/60` → `dark:bg-(--card-bg)/60`。
+   - `FilterTab.astro` 筛选 tab `rounded-[10px]` 硬编码 → `rounded-xl`（对齐 CategoryBar）。
+   - `Search.svelte` 结果面板 `100vh` → `100dvh`（移动端地址栏展开时不被遮挡）。
+
+## [v1.3.58] - 2026-09-06
+
+### 代码审计修复：暗色壁纸裂图回退 / 分享弹窗残留 / 收款码裂图
+
+对主题源码做全量审计后，修复三处局部问题（均为一两行，不动架构）：
+
+1. `banner-theme-switch.ts`：切暗色主题时 `img.src` 直接赋暗色壁纸 URL，无 `onerror`
+   回退。暗色壁纸图失效（图床挂 / URL 改 / 未配暗色图）时 banner 会裂图。修复：切暗色
+   且存在亮色 `data-light-src` 时挂 `onerror`，失败回退亮色并置空 handler 防循环。
+2. `post-share.ts`：`createModal` 开头的 `getElementById("post-share-modal")` 清理是
+   死代码（`card` 从未设 `id`）。修复：创建 `card` 后补 `card.id = "post-share-modal"`，
+   让既有清理逻辑生效。
+3. `post-reward.ts`：收款码 `img.src` 无 `onerror` 兜底，附件被删后弹窗裂图。修复：
+   `img.onerror` 隐藏裂图并置空 handler。
+
+## [v1.3.57] - 2026-09-06
+
+### 疾速档入场位移归零，消除「拉到底部刷新」时的元素跳动
+
+snappy 档入场动画原为 `slide-in-up`（`translate: 0 8px → 0`）。「拉到底部刷新」时，
+浏览器恢复滚动位置到底部，底部视口内的 `.onload-animation` 元素（footer/文章卡片）
+会播放一次 8px 位移——被感知为「刷新瞬间看到其他东西」。
+
+修复：`slide-in-up` 的 `from` 位移由 `8px` 归零（`translate: 0 0 → 0 0`）。snappy 档
+内容完全静止、立即可读（opacity 恒 1 + 无位移）。保留 slide-in-up 动画结构（位移 0 的
+no-op 动画）仅为触发 `animationend` → `removeOnloadAnimation` 移除 `.onload-animation`
+类，避免切档位时残留类重播 `fade-in-up`。
+
+- 不影响 balanced/optimal 档（它们仍用 `fade-in-up` 位移入场）
+- banner-title/subtitle 维持 v1.3.56 的「跟随 banner 图」行为
+
+## [v1.3.56] - 2026-09-06
+
+### 疾速档 banner 文字抢跑于 banner 图修复
+
+`src/styles/transition.css` 的 snappy 段（v1.2.1 `287fa34` 引入）原本把 `#banner-title` /
+`#banner-subtitle-wrapper` 与 `.onload-animation` 一并强制 `opacity:1` + `slide-in-up`——
+当时 banner 文字走 onload-animation 路径，"立即可见"语义成立。
+
+v1.3.33 重构后，banner 文字改为 `opacity:0` + 等 `.banner-reveal` 触发（与 banner 图同节奏渐显），
+但 **snappy 段未同步更新**——仍强制 `opacity:1`。结果：snappy 档下 banner 文字在 banner 图
+未加载时立即可见，文字悬浮在空 banner 上（用户报告截图）。
+
+修复：snappy 段只覆盖 `.onload-animation` 类元素（保持 120ms slide-in-up），banner 文字
+不再纳入此组，沿用默认 `.banner-reveal` 触发 + `--dur-banner: 350ms` 同步渐显。
+
+- 副标题失去 slide-in-up 是可接受代价：副标题已有 120ms 错峰 fade-in（沿用 balanced/optimal）
+- 与其他档位行为一致：snappy 档 banner 元素组与图同节奏渐显
+- 顶部 navbar 不受影响：navbar 本身无入场动画，本来就是立即可见
+
+## [v1.3.55] - 2026-09-06
+
+### 动画速度档位梯度修正（疾速档 banner 时长倒挂）
+
+审计 `relaxed / balanced / optimal / snappy` 四档全部 10 个时长变量，校验
+「舒缓 > 均衡 > 最优 > 疾速」的单调递减梯度。结论：
+
+- **唯一倒挂**：疾速档 `--dur-banner` 原为 `500ms`，比最优档的 `400ms` 还慢，
+  违反「疾速应快于最优」梯度 → 修正为 `350ms`。
+- **均衡档确认为原始主题值**：经 `git log -S` 溯源，`balanced` 档自 v1.2.1（`287fa34`）
+  引入后从未改动，即主题原生时长、零回归基线；此前「特别优化均衡档」的印象实为
+  最优档（v1.3.11 `daae2b6` 新增，约快 45%）。本次不改动均衡档。
+- 其余变量（swup/entry/entry-step/entry-max/content-delay/scroll/float/banner-transition/
+  marquee-speed）四档均已单调递减，无需调整。
+
+## [v1.3.54] - 2026-09-06
+
+### 代码审计整改：修复 13 项真实问题、清理 1 项调试遗留（基线 30f60b6 两轮审计）
+
+按「合并去误报版审计报告」逐条整改。已修复的中/低危问题：
+
+**中危（4）**
+
+- **暗色首访免重复下载 banner 大图**：桌面单图与轮播首帧原为「SSR 固定亮色 `th:src` +
+  `loading=eager`，暗色图只放 `data-theme-src` 由脚本换」→ 暗色访客每次首访多拉一张亮色图。
+  改为 `<picture>` + `<source media="(prefers-color-scheme: dark)">`，浏览器解析期直接按 OS
+  偏好选暗色图；`banner-theme-switch.ts` 首次接管时移除 source，交还 `img.src` 控制权
+  （手动切换/显式主题仍以 `html.dark` 为准）。`display:contents` 保持原布局不变。
+- **一言 `AbortSignal.timeout` 老内核兼容**：旧内核（QQ/X5/TBS，Chromium <103）无该方法，
+  直接调用会在 `fetch` 前同步抛 TypeError（不被 `.catch` 捕获）→ 卡片永久「加载中」。
+  改用 `AbortController + setTimeout`，落定后清定时器。
+- **音乐播放器歌单请求超时**：`fetchMetingData` 无超时，弱网/代理挂起时 Promise 永不落定、
+  加载态一直转。加 `AbortController` 15s 超时（`finally` 清定时器）。
+- **归档/番剧页 popstate 监听累积**：内联脚本位于 Swup 容器内、每次换页克隆重执行，
+  `addEventListener("popstate")` 随导航次数累积 N 份 → 后退一次并发 N 份 `loadArchive`。
+  改全局守卫只绑一次，经 `window.__etherealArchiveLoad` / `__etherealBangumiLoad` 转发到
+  最新一次执行的 `loadArchive`。
+
+**低危（9）**
+
+- `RecentComments` 的 `__themeSafeFetch` 全仓库未定义（超时设计从未落地）→ 改为自包含
+  `AbortController + setTimeout`（默认 8s），并移除同样未定义的 `renderWidgetError` 分支。
+- `PopularPosts` 未走视口懒加载（与 Weather/Hitokoto/RecentComments/SiteStats 不一致）→
+  改 `window.__themeLazyInit("popular-posts-list", loadPopularPosts)`。
+- `post.astro` 点赞块对 `post.stats` 判空不一致（顶部有 `!= null` 守卫、点赞块无）→
+  `post.stats?.upvote ?: 0` 补空安全。
+- `random-fish` 抓朋友圈页无超时 → 连接挂起时按钮卡「正在钓」，加 8s 超时。
+- `upvote` 对 `localStorage` 无 try/catch → 隐私模式/禁存储下 SecurityError 中断初始化，
+  加 `storageGet/Set/Remove` 安全包装。
+- 换肤/语言兜底以文案正则猜模式（`/亮|Light/` 等）→ 非拉丁/自定义 i18n 文案即失效。
+  `LightDarkSwitch.svelte` / `LanguageSwitch.svelte` 加 `data-mode` / `data-lang` 属性，
+  兜底直接读属性。
+- `#comment` 懒加载 IO 换页未 disconnect → 每篇「没滚到评论区就离开」的文章滞留一个 IO +
+  旧 DOM 引用。`commentLazyIo` 提升到模块级，每次 `initCommentLazyLoad` 开头先断开上一次。
+- 归档/番剧局部加载无超时中止 → 弱网 `loading` 恒 true、tab 点击被丢弃、后退 URL 与 UI
+  不一致。`loadArchive` 的 fetch 加 10s 超时，超时走整页跳转兜底。
+- 诊断探针（QQ/X5 兼容调试遗留，`?ethereal-diag=1` 弹浮条）已整体删除。
+
+**暂缓/不修复（2，架构性高代价低收益）**
+
+- `theme.config` 全量下发冗余：仅自用主题、非漏洞（Key 已降级为低），改为按页白名单注入
+  会牵动所有客户端 `#theme-config` 消费方，风险高于收益。
+- 站内 i18n 经 `[(...)]`（Thymeleaf JS inlining，已转义）注入，`</script>` 闭合风险极低
+  （仅站长可控翻译源）；补 `</` 转义会触发 attoparser 解析期 500（`Layout.astro` 内已注释）。
+
+## [v1.3.53] - 2026-09-05
+
+### 修复：定位落点可能被重复滚动（settle/maxTimer 双重触发 doScroll）
+
+- **现象**：评论区尺寸在定位开始约 3.4s 后仍在变化时，`settleTimer`（240ms 防抖）与
+  `maxTimer`（3500ms 兜底）会先后各触发一次 `doScroll`，第二次 `window.scrollTo` 打断/
+  覆盖第一次平滑滚动，落点被重复计算（轻微抖动）。
+- **改动**：`doScroll` 加 `scrolled` 守卫（幂等），两条路径只执行一次滚动。
+
+## [v1.3.52] - 2026-09-05
+
+### 优化：跳转评论落点由「贴顶」改为「垂直居中」
+
+- **现象**：跳转到单条评论时，落点紧贴顶部导航栏下方（`navH + 16`），评论太靠上，
+  移动端尤其明显，观感差。
+- **改动**：`settleAndScrollOnce` 的 `doScroll` 把落点从 `absTop - (navH + 16)` 改为
+  `absTop - max(navH, (视口高 - 元素高) / 2)`——评论元素中心对齐视口中心（居中）；
+  元素高于视口时退化为贴 navbar 下方（避免顶部被固定导航栏遮挡），并照常 clamp 到
+  `[0, maxScroll]`。
+- 普通 `#comment`（跳转到评论区整体）行为不变，仍 `scrollIntoView` 滚到评论区顶部。
+
+## [v1.3.51] - 2026-09-05
+
+### 重构：comment-locate.ts 代码清理（无功能变化）
+
+- 精简冗余注释（历史排查叙述压缩为单行关键机制说明），去掉 `flashWhenSettled` 里
+  `onScrollEnd` 纯包装函数（scrollend 监听直接绑定 `finish`），合并 `settleAndScrollOnce`
+  里 `doScroll` 的中间变量（`gap`/`docH`/`desired` 内联）。
+- 行为不变：findTarget / waitForTarget / flash / flashWhenSettled / settleAndScrollOnce /
+  locateComment 的时序逻辑与原版完全一致。
+
+## [v1.3.50] - 2026-09-05
+
+### 修复：评论跳转高光脉冲播两遍（同一条评论亮两次）
+
+- **现象**：从侧栏「最近评论」等入口跳到某条评论时，高光脉冲播放两遍（亮一次→淡掉→又亮一次）。
+
+- **根因**：`comment-locate.js` 是 `defer` 外部脚本，会被 SwupScriptsPlugin 在每次换页时
+  **克隆重执行**。脚本顶层原本裸调 `bind()`（→ `locateComment()`），加上 `onPageView("comment-locate", bind)`
+  在 `page:view` 每次换页也会调一次 `bind()`，于是换页到评论锚点时 `locateComment()` 被调用
+  **两次**（一次来自重执行脚本的顶层 `bind`，一次来自 `page:view` handler），同一 hash 被定位
+  两次 → `flash()` 播两遍。
+
+- **改动**：顶层首次判定 hash 的 `bind()` 用 `onceBound("comment-locate:init", …)` 去重——
+  首次整页加载时执行一次，SwupScriptsPlugin 换页重执行脚本时跳过；换页后的 hash 判定完全交给
+  `onPageView` 的 handler（每次换页恰好触发一次），与其它脚本（navbar / banner 系列）的
+  「顶层初始化 once 去重 + onPageView 换页驱动」范式保持一致。
+
+## [v1.3.49] - 2026-09-05
+
+### 修复：评论跳转高亮/精准落位只在文章页生效，其它页面评论区缺失
+
+- **现象**：`comment-locate.js`（评论锚点落位高亮 + 一次滚到位）只在 `post.astro` 加载，
+  但 `links`（友情链接）/ `moment`（动态）/ `page`（独立页面）/ `photo`（照片）四个页面
+  同样渲染 `<halo:comment>` 评论区，跳转到这些页面的评论时既无高亮、也无精准落位。
+
+- **根因**：四个页面的评论区结构（`#comment` + `comment-lazy-template` + `comment-lazy-placeholder`）
+  与文章页一致，但漏挂了 `comment-locate.js` 脚本。`comment-locate.ts` 本身是页面无关的
+  （`document.getElementById("comment")` + 穿透 `<comment-widget>` shadow root 搜评论锚点，
+  均与 group/kind 无关）。
+
+- **改动**：在 `links.astro` / `moment.astro` / `page.astro` / `photo.astro` 的评论区末尾补挂
+  `<script src="comment-locate.js" defer>`，`th:if` 条件与各自评论区的显示条件一致
+  （避免评论区被关时仍加载无用脚本）。
+
+- **影响范围**：仅补全四个非文章页面的评论跳转高亮/落位；文章页行为不变。
+
+## [v1.3.48] - 2026-09-05
+
+### 优化：精准跳转评论「一次到位」（消除插件先滚偏 + 主题再校正的两段式观感）
+
+- **现象**：1.3.47 虽把落点校正到正确位置，但实现是「插件先 `scrollIntoView` 滚到偏低位置 → 主题等稳定后 `window.scrollTo` 再往上校正一次」——用户仍能感知到两段式滚动（先下后上，间隔约 0.5-1s 的停顿），观感仍未「一步到位」。
+
+- **根因**：`comment-next` 插件在**挂载时**读 `location.hash` 立即滚动，而此时评论区 input/tabs/头像等异步内容还没加载完，它滚向的是「暂态位置」。主题侧无论怎么事后校正，都绕不开「插件先滚了一次」这个既成事实。
+
+- **改动**（`src/scripts/assets/comment-locate.ts` 精准模式）：
+  1. 在评论区激活前，用 `history.replaceState(null, "", "#comment")` 把 hash 临时改成 `#comment`——保留 `wantsComment`（评论区照常激活），但不再匹配插件对单条评论 id 的检查 → **插件挂载时不触发它自己的滚动**。
+  2. `settleAndCorrectScroll` 重写为 `settleAndScrollOnce`：不再「等插件 scrollend + 校正」，而是等 `<comment-widget>` 尺寸稳定 240ms 后，按当前真实位置**一次性 `window.scrollTo` 到位**。
+  3. 滚动完成后 `history.replaceState` 恢复原 hash（replaceState 不触发 `hashchange`、不触发原生锚点滚动，插件不会二次滚动）。
+
+- **结果**：从点击到落位只有**一次平滑滚动**（紧贴 navbar 下方 16px），中间无停顿、无方向反转。桌面端目标仍受 `maxScroll` 限制落在文档极限（282px，无法再高），但不再有「先滚下去再回一点」的拉扯。
+
+- **影响范围**：仅精准跳转（`#comment-next-*`）；普通 `#comment` 跳转行为不变。
+
+## [v1.3.47] - 2026-09-05
+
+### 修复：精准跳转到单条评论时落点偏低（评论区内容加载未完插件就触发滚动）
+
+- **现象**：1.3.46 后高亮时序/动画正常，但「跳转评论定位不准确，观感不好」——
+  agent-browser 实测：跳转后首条评论落在视口 282px（桌面 1440×900）/ **402px**（移动 390×844），
+  远偏离理想落点（紧贴 72px 桌面 navbar 下方 16px = 88px / 紧贴 63px 移动 navbar 下方 16px = 77px）。
+  移动端尤其明显：首条评论离 navbar 400+ px，input + tabs 占据上方大半视口，视觉上像「只滚到评论区」而非「精准跳到这条评论」。
+
+- **根因**：`comment-next` 插件在挂载时读 `location.hash` 立即 `scrollIntoView({block:"start"})`，
+  但此时评论区内容（输入框 tabs / 头像 / 嵌套评论等）还在异步加载，插件用的是**加载前的暂态位置**。
+  等内容真正渲染完，目标元素已被上方新加载的内容推下，原落点就偏了。
+  - 桌面端：`scrollIntoView` 目标位置超出文档底部，被 maxScroll 卡住，落点 ≈ 282px（已是文档极限，无法再高）；
+  - 移动端：文档更高（6664px），maxScroll 还有富余（5820），但插件滚到的是加载前的位置（4250），
+    内容加载完后目标被推下到 402px，**有 325px 的校正空间但没做**。
+
+- **改动**（`src/scripts/assets/comment-locate.ts` 精准模式）：
+  1. 新增 `settleAndCorrectScroll(el)`：先等插件自身的 `scrollend`（平滑滚动结束），
+     再用 `ResizeObserver` 监听 `<comment-widget>` 尺寸，等 240ms 未变化视为「评论区内容稳定」，
+     然后按当前真实位置重新算理想落点 = `min(itemAbsTop - (navH + 16), maxScroll)`，
+     用 `window.scrollTo({behavior:"smooth"})` 校正到位，最后再交给 `flashWhenSettled` 闪高亮。
+  2. 桌面端：插件已到 maxScroll，校正 diff < 20px 跳过 → 行为不变（落点 282px 已是文档极限）。
+  3. 移动端：校正后落点 → 77px（紧贴 63px navbar 下方 16px），即用户期望的「精准落在评论条」。
+
+- **影响范围**：仅精准跳转（`#comment-next-*`）的最终落点；普通 `#comment` 跳转（滚到评论区卡片顶部）行为不变。
+
+## [v1.3.46] - 2026-09-05
+
+### 优化：评论跳转高亮的时序与视觉效果（长文章高亮看不见）
+
+- **现象**：1.3.45 后评论跳转已能精确落位，但高亮只在目标元素一进 DOM 时播一次 0.9s 脉冲——而 comment-next 的平滑滚动此时才刚开始。长文平滑滚动要 1s+，脉冲在滚动途中就播完，用户滚到位时高亮早已消失（「文章过长可能高亮效果看不见」）。
+
+- **根因**：`comment-locate.ts` 的 `findTarget` 命中（目标进入 DOM）≠ 滚动到位（插件 `scrollIntoView` 才刚起步）。高亮触发点与滚动完成点解耦，0.9s 动画不足以跨过长文的滚动窗口。
+
+- **改动**：
+  1. `src/scripts/assets/comment-locate.ts`：新增 `flashWhenSettled()`，高亮改在「目标进入视口 + 滚动停稳」后触发——`scrollend`（现代浏览器权威信号）+ `scroll` 空闲 debounce（旧浏览器/无滚动兜底）+ 视口判据（`getBoundingClientRect`，目标没滚进视口绝不闪）+ 4s 绝对兜底。精准模式与普通 `#comment` 均接入。
+  2. `src/styles/components.css` + shadow root 注入样式同步：高亮动画由 0.9s 单次 outline 脉冲改为 **1.6s「快速出现 → 保持 → 淡出」hold 脉冲**，环色 55%→60%、底色 16%→18%，视觉存在感更强。
+  3. `flash()` 加 `setTimeout` 兜底清理（动画被中断时 `animationend` 可能不触发，避免 class 残留）。
+
+- **影响范围**：仅评论落位高亮（`.comment-locate-flash`）的触发时机与动画参数；跳转滚动路径（插件负责精准滚动）不变。
+
+## [v1.3.45] - 2026-09-05
+
+### 修复：侧栏「最近评论」直接点击仍不跳转（`to.hash` 带 `#` 前缀，回顶判断失效）
+
+- **现象**：1.3.44 后「上下拉扯」消失，但直接点击评论仍不跳转到那条评论；右键「新标签页打开」则正常。
+
+- **根因（真实点击 + `scrollTo` 打桩抓调用栈定位）**：1.3.42 在 `content:scroll` 里加的「评论区锚点跳过 SwupScrollPlugin 滚动」判断写成了 `hash.indexOf("comment") === 0`，但 Swup 的 `visit.to.hash` **带 `#` 前缀**（`#comment-next-comment-<name>`），`#` 占 0 位导致 `indexOf("comment")` 返回 **1**，判断恒为 false、`return` 从未生效。于是 SwupScrollPlugin 的 `doScrollingBetweenPages` 照常执行：`maybeScrollToAnchor` 在 light DOM 里找不到 shadow DOM 内的评论锚点 → fall through 到 `scrollTo(0)` **回顶**（scrl 引擎每帧强制 `scrollTo(0)`，实测 2304–2912ms 约 50 次），覆盖了插件的 `scrollIntoView`。冷加载（新标签）无 Swup 回顶，所以正常；从 scrollY=0 点击时回顶无位移，所以此前合成点击复现不出。
+
+- **改动**（`src/scripts/app.ts` 的 `content:scroll`）：判断改为 `hash.replace(/^#/, "").indexOf("comment") === 0`，先去掉 `#` 前缀再判断，让 comment 锚点场景真正 `return`、退出 SwupScrollPlugin 滚动。
+
+- **影响范围**：仅评论区锚点（`#comment` / `#comment-next-*`）的 Swup 滚动；目录锚点、回顶、popstate 等行为不变。
+
+## [v1.3.44] - 2026-09-05
+
+### 修复：侧栏「最近评论」跳转仍有上下拉扯感（主题与插件双 scrollIntoView 竞争）
+
+- **现象**：1.3.43 上线后点击「最近评论」跳转仍有「上下拉扯感」（滚动一顿一顿 / 先上后下）。
+
+- **根因（真实浏览器 + scrollIntoView 调用记录定位）**：1.3.43 在精准模式下，`comment-locate.ts` 找到目标评论后调了一次 `el.scrollIntoView({smooth})` 兜底滚；而 comment-next 插件挂载时读 `location.hash` 也自己滚了一次。实测 `scrollIntoView` 被调用 **2 次**（间隔仅 22ms、同一目标、都是 smooth）——两个 smooth 几乎同时启动互相取消，产生拉扯。插件自身的滚动本来就精确（目标评论顶部落到视口顶部），主题的滚动纯属多余竞争。
+
+- **改动**（`src/scripts/assets/comment-locate.ts`）：精准模式（`#comment-next-*`）**彻底不再滚动**，只补高亮（穿透 shadow root 后 `flash`）。滚动完全交给插件。普通 `#comment`（从邮件/通知进入）仍由主题滚到评论区顶（插件不处理 `#comment`）。
+
+- **影响范围**：仅侧栏评论精准跳转；`#comment` 锚点、目录、回顶等行为不变。
+
+## [v1.3.43] - 2026-09-05
+
+### 修复：侧栏「最近评论」精准跳转仍失败（评论渲染在 Shadow DOM 内，主题高亮永远找不到目标）
+
+- **现象**：1.3.42 上线后侧栏评论跳转仍「跳不到那条评论 / 有冲突」。
+
+- **根因（真实浏览器复现定位）**：comment-next **1.0.13** 把评论列表渲染在 `<comment-widget>`（Svelte web component）的 **Shadow DOM** 里，而非 light DOM：
+  - `document.querySelectorAll('comment-widget')[0].shadowRoot` 里才有 `comment-next-comment-<name>`（实测 shadow 内 3 条、light DOM 0 条）。
+  - 主题 `comment-locate.ts` 的 `findTarget()` 用 `document.getElementById()` **只搜 light DOM**，永远找不到目标 → 每次等满 3.5s 超时 → 高亮退化成整块闪（且 `.comment-locate-flash` 是 light DOM CSS，穿透不进 shadow root，加了类也不生效）。
+  - 真正的「有冲突」：`locateComment()` 之前**无条件先 `box.scrollIntoView(smooth)` 滚到 `#comment` 顶**，紧接着插件挂载后自己又 `scrollIntoView` 到具体评论——两个平滑滚动竞争。
+  - （插件自身的精确滚动是正常的：实测目标评论落在视口顶部，Swup 换页与冷加载两种路径都 OK；缺的只是主题的高亮，以及先滚 #comment 顶造成的打架。）
+
+- **改动**（`src/scripts/assets/comment-locate.ts`）：
+  1. `findTarget()` 穿透 shadow root：先搜 light DOM（兼容旧版），再遍历 `querySelectorAll('comment-widget')` → `widget.shadowRoot.getElementById(...)`。
+  2. `flash()` 支持 shadow 元素：目标在 shadow root 内时，往该 shadow root 注入一份与 light DOM `.comment-locate-flash` 等价的 `<style>`（CSS 自定义属性 `--primary`/`--hue` 会从 host 沿树继承穿透，shadow 内直接 `var(--primary)` 即可）。
+  3. `locateComment()` 精准模式（`#comment-next-*`）**不再先滚 `#comment` 顶**，滚动交给插件（找到元素后兜底精确滚一次）；普通 `#comment` 才保留「滚到评论区顶」。
+
+- **影响范围**：仅修正侧栏评论精准跳转/高亮；`#comment`（从邮件/通知进入）、目录锚点、回顶等行为不变。
+
+## [v1.3.42] - 2026-09-05
+
+### 修复：侧栏「最近评论」精准跳转失败（SwupScrollPlugin 滚动冲突）
+
+- **现象**：1.3.41 上线后侧栏评论跳转失败/滚动异常。
+
+- **根因**：1.3.41 把侧栏链接从 `#comment`（评论区容器，元素换页瞬间**已存在**）改成了 `#comment-next-comment-<name>`（单条评论，元素要等评论区懒加载渲染后**才存在**）。SwupScrollPlugin 在 `content:scroll` 时检测到 `visit.to.hash`，用其 **scrl 引擎**滚动到锚点：
+  - 1.3.40（`#comment`）：锚点元素存在 → 引擎滚到容器，与 `comment-locate.ts` 的 `scrollIntoView` 目标一致，即使竞争也停在评论区，看起来正常；
+  - 1.3.41（`#comment-next-comment-<name>`）：锚点元素**不存在** → 引擎找不到目标，其每帧强制 `scrollTop` 覆盖了 `comment-locate.ts` 的原生 `scrollIntoView` → 互相打架、跳转失败。
+
+- **改动**（`src/scripts/app.ts` 的 `content:scroll` 钩子）：评论区锚点（hash 以 `comment` 开头，含 `#comment` 与 `#comment-next-*`）时**直接跳过 SwupScrollPlugin 的滚动**（不调 `defaultHandler`、不回顶），滚动完全交给 `comment-locate.ts`（原生 `smooth`，等评论区渲染后精准落位）。同页目录锚点走 `linkToAnchor` 路径，不受影响。
+
+- **影响范围**：仅修正侧栏评论跳转与 `#comment` / `#comment-next-*` 锚点进入文章页的滚动；目录点击、回顶、popstate 等滚动行为不变。
+
+## [v1.3.41] - 2026-09-05
+
+### 优化：侧栏「最近评论」精准定位到具体那条评论并高亮
+
+- **背景**：1.3.40 只把所有跳转都定位到评论区顶部。实测 comment-next **1.0.6 起已内置单条锚点**（从 `PluginCommentNext-1.0.13.jar` 的 `comment-next.iife.js` 挖出）：
+  - 元素 id：`comment-next-comment-<name>`（顶层评论）/ `comment-next-reply-<name>`（回复）
+  - 链接格式：`#comment-next-comment-<name>`（URL 编码）
+  - 插件自带 `scrollIntoView`（尊重 `prefers-reduced-motion`）+ `scroll-margin-top: var(--comment-next-anchor-offset, 5rem)`
+  - **但它不做高亮**（产物里 `flash` / `highlight` 均 0 处）
+
+  所以主题侧只需两件事：把链接换成精准锚点、补上高亮。
+
+- **改动**（3 个文件）：
+  - `src/components/widget/RecentComments.astro`：跳转链接由 `permalink + "#comment"` 改为 `permalink + "#comment-next-comment-" + encodeURIComponent(评论名)`；拿不到评论名时退回原评论区锚点。
+  - `src/scripts/assets/comment-locate.ts`：
+    - 新增精准模式：解析 `#comment-next-(comment|reply)-<name>`，轮询等目标元素进入 DOM（120ms 间隔、3.5s 超时）后**高亮它本身**。
+    - **两种前缀都试**（`comment-next-comment-` / `comment-next-reply-`）：侧栏接口返回的顶层字段只有 `name/displayName/emailHash/content/creationTime/subjectRef/subjectTitle/permalink`，**不区分顶层评论与回复**，容错成本极低。
+    - 兜底再滚一次：插件只在组件初始化时定位一次，若评论区本次导航前已激活（`initCommentLazyLoad` 幂等 return），插件不会重跑，这里补一次 `scrollIntoView`；元素上已有插件设的 `scroll-margin-top`，偏移自适应。
+    - 找不到目标元素时退回高亮整个评论区，不至于毫无反馈。
+  - `src/styles/components.css`：
+    - `.comment-locate-flash` 去掉 `#comment` 限定（精准锚点时高亮的是单条评论元素），并补 `border-radius` 让 outline 贴合卡片。
+    - 新增 `--comment-next-anchor-offset: calc(var(--navbar-height, 4rem) + 1rem)`，让插件的单条锚点偏移与评论区自身对齐（默认 5rem 会被 navbar 盖住）。
+
+- **影响范围**：仅影响侧栏「最近评论」的跳转；直接访问 `...#comment` 或从邮件/通知链接进入的行为完全不变。需要 comment-next ≥ 1.0.6，旧版本会自动退回「定位到评论区顶部 + 高亮整个评论区」。
+
+## [v1.3.40] - 2026-09-05
+
+### 优化：侧栏「最近评论」跳转落位与评论区懒加载对齐时序
+
+- **问题**：1.3.3 把评论区改成懒加载（`<template>` + IntersectionObserver）后，从侧栏「最近评论」点进文章页时，`comment-locate.ts` 在 `page:view` 时**立刻**播放 0.9s 的 `comment-locate-flash` 高亮脉冲。但此刻评论区还只是个约 80px 的标题壳子，`comment-next`（~120KB）尚未下载、评论列表尚未渲染 —— **高亮在内容出现前就播完了，用户实际看不到任何落点提示**；同时 IO 要等评论区接近视口（提前 400px）才激活，点击后还要白白等 1-2 秒空白。
+
+- **改动**（3 个文件）：
+  - `src/scripts/app.ts`：
+    - 带 `#comment` 锚点进入时**跳过 IntersectionObserver 立即激活**评论区（用户意图明确，省掉 400px 预滚动 + 一次 IO 回调的延迟）。
+    - 新增 `trackCommentReady()`：用 `ResizeObserver` 观察 `#comment` 高度，超过空壳阈值（160px）且连续 2 帧不变即判定内容已渲染，打上 `data-comment-ready` 并派发 `comment:ready` 事件；无 `ResizeObserver` 或 4s 硬超时时兜底放行。
+  - `src/scripts/assets/comment-locate.ts`：
+    - **滚动保持立即执行**（不再延后）—— `#comment` 的顶边位置由上方正文决定，评论区内容撑开只增加自身高度、不改变顶边，所以此刻滚动的落点本来就是准确的，延后反而让用户多等 1-2 秒且毫无反馈。
+    - **高亮延后到 `comment:ready` 之后**再播（3.5s 兜底），让 0.9s 脉冲真正落在评论内容上。
+    - 等待期间给 `#comment` 加 `comment-locating`，显示加载提示。
+    - 尊重 `prefers-reduced-motion`：命中时滚动改用 `auto`（瞬时），不播平滑滚动动画。
+  - `src/styles/components.css`：新增 `.comment-locating` 的「评论加载中…」提示样式。
+
+- **影响范围**：仅影响带 `#comment` 锚点进入文章页的路径（侧栏最近评论 / 通知邮件链接）。正常滚动到评论区的行为完全不变（仍由 IO 懒加载，且不会显示加载提示）。桌面端与移动端一致。
+
+## [v1.3.39] - 2026-09-05
+
+### 清理：修正注释中已失效的 `wave.js` 引用 + 移动端入场动画兜底收紧
+
+无功能性变更，纯维护性清理：
+
+- **注释清理**（6 个文件 8 处）：1.3.37 删除 `src/scripts/assets/wave.ts` 后，多处注释仍在拿已不存在的 `wave.js` 当范式参照，改为引用现存同模式文件：
+  - `banner-carousel.ts`：`#theme-config` 读取参照改 `banner-src-switch.js`；`guardOnce` 跨页守卫改「与各 `banner-*.js` 同模式」。
+  - `banner-media.ts`：屏幕外暂停改「与 `banner-carousel.js` 同构」；`guardOnce` 同上。
+  - `banner-src-switch.ts`：`guardOnce` 同上。
+  - `banner-drop.ts` / `banner-typewriter.ts`：`visibilitychange` 守卫互相参照（原本都参照 `wave.js`）。
+  - `wallpaper.ts`：`desktop_only` 档的移动端隐藏**已改为纯 CSS**（`@media(pointer:coarse)` + `#wave-container[data-wave-mode]`），原注释仍描述为「`wave.js` 的运行时守卫」，一并更正。
+
+- **移动端入场动画兜底收紧**（`src/utils/settings/wallpaper.ts`）：`applyBannerTitle()` 的 `animationend` 监听等待 `#banner-subtitle-wrapper` 的动画结束才移除 `banner-title-enter`。1.3.38 起移动端副标题被 CSS 隐藏，**`display:none` 的元素不跑动画、`animationend` 永不触发**，该监听在移动端形同虚设，只能等 800ms 兜底。现按副标题实际可见性（`getComputedStyle(display !== "none")`）区分：可见 800ms，隐藏 500ms（标题动画 delay 130ms + 300ms + 余量），避免 class 在移动端多挂约 300ms 影响下次重新入场。
+
+- **影响范围**：无渲染输出变化；桌面端零变化（副标题可见时仍走原 800ms 路径）。
+
+## [v1.3.38] - 2026-09-05
+
+### 优化：移动端不显示 banner 副标题（并停止其打字机/光标动画）
+
+- **动机（Lighthouse 移动端无痕报告实锤）**：banner 副标题的打字机效果是**持续**的 `setTimeout` 打字链（80ms/字）+ 光标 `setInterval(530ms)` 闪烁，在移动端持续占用主线程（主线程 "Other" 1384ms 的一部分）。
+
+- **改动**：
+  - `src/layouts/MainGridLayout.astro`：`#banner-subtitle-wrapper` 加 `hidden md:flex`（<768px 隐藏），移动端不显示副标题；桌面端（≥768px）完全不变。
+  - `src/scripts/assets/_banner-title-shared.ts`：骨架 `initBannerSubtitle` 加移动端守卫（`matchMedia("(max-width: 767.98px)")` 命中直接 return）。**关键点**：骨架原本只判「背景文字隐藏开关」、**不判元素可见性**——若不加此守卫，副标题被 CSS 隐藏后打字链与光标闪烁仍会在隐藏元素上持续运行、继续占用主线程。
+
+- **影响范围**：移动端不显示 banner 副标题（含光标），打字机 / drop 两种副标题效果均不再初始化；**桌面端观感与行为零变化**。
+
+## [v1.3.37] - 2026-09-05
+
+### 优化：波浪背景动画改用 CSS transform（移除 JS rAF 改 viewBox）
+
+- **动机（Lighthouse 移动端实锤）**：`wave.js` 每帧 `setAttribute("viewBox")` 触发主线程 layout/paint，是移动端 TBT 最大单项（bootup ~2.2s 主线程 + Style & Layout ~2.1s）。performance 0.49 的三大元凶之首。
+
+- **改动**（`src/components/WaveEffect.astro`，删除 `src/scripts/assets/wave.ts`）：
+  - 3 层 SVG 统一 `viewBox="0 0 2880 200"` + `width:200%`，各画 2/3/4 个重复周期（2880 = 2×1440 = 3×960 = 4×720 公倍数）；用 CSS `@keyframes` 的 `translateX` 平移一个周期无缝循环（50% / 33.333% / 25%）。
+  - 周期密度与原版一致：三层周期 1440/960/720 逻辑 px（对应 1 / 0.667 / 0.5 视口宽），时长 9s/4s/2s 与原 `speeds[18,12,8]` 的周期频率一致，视觉几乎无差。
+  - `desktop_only` 移动端隐藏改 `@media(pointer:coarse) #wave-container[data-wave-mode="desktop_only"]`（替代原 wave.js 的 `matchMedia("(pointer:coarse)")` 运行时守卫）。
+
+- **收益**：`transform` 走合成器线程、不占主线程，桌面端与移动端均更流畅，移动端 TBT 显著下降。视觉观感不变。
+
+## [v1.3.36] - 2026-09-05
+
+### 修复：标签页 Top 10 首次加载显示「请启用 JavaScript」、刷新才正常
+
+- **现象（用户实锤）**：首次经 Swup 链接进入 `/tags` 页时，Top 10 卡片区一直显示降级文案「请启用 JavaScript 以查看 Top 10 标签。」，手动刷新一次后才正常渲染条形排行。
+
+- **根因**：`tags.astro` 的 Top 10 `<script>` 内使用了 `import { onPageView, guardOnce } from "../utils/once"`，Astro 因此把它打包成独立的 `type="module"` 脚本（`tags.astro_..._lang.<hash>.js`）并**提升到 `</html>` 之后**（`#swup-container` 之外）。Swup 换页只替换容器、不会加载/执行容器外的 module 脚本（SwupScriptsPlugin 只重执行当前 document 里已有的脚本），于是首次导航进入本页时 `renderTop10` 从未运行 → fallback 常驻；刷新走全量加载、浏览器自然加载并执行该 module → 正常。同类交互页（如分类页 `categories.astro`）用 `<script is:inline>` 内联在容器内，故不受影响。
+
+- **修复**（`src/pages/tags.astro`）：Top 10 渲染脚本改为 `<script is:inline>`（去掉 once 依赖与 import），自包含 `renderTop10` 并直接同步执行——脚本本就位于 `#all-tags-data`/`#top-tags-list` 之后，且每次 Swup 换页由 SwupScriptsPlugin 重执行（容器已替换），故无需 `onPageView`/`guardOnce` 守卫，全量加载与换页两条路径均能正确渲染。
+
+## [v1.3.35] - 2026-09-05
+
+### 修复：Banner 标题/副标题 + 分类导航栏刷新抢跑闪烁
+
+- **现象（用户截图实锤）**：刷新后零点几秒内，`#banner-title`/`#banner-subtitle-wrapper`（Banner 中央标题/副标题）与 `#category-bar`（分类导航栏）先行浮现，而 banner 图与内容卡片仍为空白，造成"文字漂浮在黑底/空白上"的时序闪烁——与 1.3.33 修复 `#home-moments` 同类，但当时未覆盖这两处。
+
+- **根因**：
+  - Banner 标题/副标题：各自跑 `300ms fade-in-up`（50/130ms 延迟），而 banner **图**走的是 `showBanner()` 绑定 `img.onload` 的 `700ms` 渐显——两者时序脱钩，图片尚黑（`opacity:0`）时标题已淡入完成。
+  - `#category-bar`：挂了 `onload-animation` 但 transition.css 无对应 `animation-delay`（`delay=0`），比内容区（`--content-delay`）早约 150ms 完成入场。
+
+- **修复**（`src/styles/transition.css`）：
+  - Banner 标题/副标题改为**随图同刻渐显**：静态 `opacity:0`，待 `.banner-reveal` 图片 onload 移除 `opacity-0`（`showBanner()`，或 Layout 1.5s 兜底 `revealBanner`）后，用 `--dur-banner`（700ms）过渡与图片同一节奏淡入，副标题再错峰 120ms。疾速档 `opacity:1` 覆盖 + `slide-in-up` 不受影响。
+  - `#category-bar` 补 `animation-delay: min(var(--content-delay), var(--dur-entry-max, 400ms))`，对齐内容区、随内容卡片一起入场。
+
+## [v1.3.34] - 2026-09-05
+
+### 优化：朋友圈「加载更多」新卡片立即入场
+
+- **现象**：朋友圈「加载更多」点击后，新卡片继承首屏 SSR 的错峰延迟 `min(calc(var(--content-delay) + index * var(--dur-entry-step)), var(--dur-entry-max, 400ms))`——加载更多批次里 `index` 已是 30+，延迟全被 `--dur-entry-max` 截断到 400ms，导致「点击后空等 400ms，再整批一起淡入」，对用户主动操作响应迟钝。
+
+- **修复**（`src/scripts/assets/friends.bundle.js` 的 `updateDisplay`）：加载更多（`prev > 0 && current > prev`）时，把新增 group 内 `.friends-card` 的 `animationDelay` 归零，让新卡片立即播放 fade-in-up 入场；首屏（`prev=0`）保持 SSR 的错峰演出不变。
+
+## [v1.3.33] - 2026-09-05
+
+### 修复：首页瞬间栏刷新时"抢跑可见"闪烁
+
+- **现象（用户截图实锤）**：刷新后零点几秒内，`#home-moments`（瞬间走马灯 + 标签筛选）已显示，而 banner 区与内容卡片区仍为空白（banner 图加载 + onload-animation opacity:0 阶段），造成"下半先出现、上半还黑"的时序闪烁。
+
+- **根因**：`#home-moments` 挂了 `onload-animation` 但**没有任何 `animation-delay` 规则**（`delay=0`），而内容卡片区 `#content-wrapper` 延迟 `--content-delay`（150ms）、banner 标题/副标题延迟 50/130ms。于是瞬间栏 300ms 就完成入场，比其他区块早 100~200ms 可见，产生"抢跑"。
+
+- **修复**（`src/styles/transition.css`）：给 `#home-moments` 补 `animation-delay: min(calc(var(--content-delay) + 100ms), var(--dur-entry-max, 400ms))`，让它对齐内容区、随内容卡片一起入场，不再抢跑；疾速档 `--dur-entry-max:0` 时错峰清零、立即入场（本就不闪烁）。
+
+## [v1.3.32] - 2026-09-05
+
+### 新增：瞬间走马灯滚动速度纳入动画速度档位（可自定义）
+
+- **诉求**：首页「瞬间」走马灯的滚动速度此前由 JS 硬编码（约 48px/s），完全不受「动画速度」档位控制——疾速档下其他入场动画都已加快，走马灯却仍慢悠悠滚动，观感割裂；后台「自定义动画时长」里也没有对应项，无法单独调节。
+
+- **改动**：
+  - 新增全局变量 `--marquee-speed`（走马灯滚动速度，px/s，无单位），四档速度：均衡 48（原值，零回归）/ 舒缓 36 / 最优 60 / 疾速 80。
+  - `src/components/HomeMoments.astro`：走马灯内联脚本改为读取 `getComputedStyle(document.documentElement).getPropertyValue("--marquee-speed")` 计算滚动时长（`duration = max(20, groupWidth / speed)`），fallback 48。
+  - `src/styles/speed.css`：四档各补 `--marquee-speed`。
+  - `src/utils/speed-style.ts`：`SPEED_CUSTOM_DEFAULTS` 增 `marqueeSpeed: 48`，th:style 拼接 `--marquee-speed`（无 ms 后缀）。
+  - `settings.yaml`：「自定义动画时长」组新增 `marqueeSpeed`（瞬间走马灯速度，px/s，20–200，默认 48）。
+  - `src/types/config.ts`：`speedCustom` 增 `marqueeSpeed`，并补上此前遗漏的 `speedTier` 档位 `"optimal"`。
+
+### 统一：导航抽屉交互动画接入速度档位
+
+- 移动端抽屉菜单的展开/淡入动画此前硬编码，疾速档下不随档位加快。现将以下动画统一改用 `--dur-*` 变量：
+  - `#nav-menu-overlay` 遮罩淡入 `250ms` → `--dur-swup`；
+  - `#nav-menu-panel` 抽屉滑入 `250ms` → `--dur-swup`；
+  - `.nav-drawer-link` 菜单项错峰入场 `300ms` → `--dur-entry`；
+  - `.floating-controls` 浮动按钮淡出 `200ms` → `--dur-swup`。
+  - 均衡档下基本无感（250→200ms 微调、300→300ms 零变），疾速/舒缓档下随档位统一变化。
+
+## [v1.3.31] - 2026-09-05
+
+### 修复：刷新后滚到底部，滚动条挂载瞬间页面跳动
+
+- **现象（用户「网站滚到下面再刷新，刷新成功之后一秒内它会滚动一点小距离」）**：刷新后浏览器把滚动位置恢复到底部，紧接着 OverlayScrollbars 懒挂载（3.5s 兜底）触发，页面自动跳动一小段距离。
+
+- **根因**：1.3.9 起为把滚动条挂载的长任务移出 Lighthouse TBT 窗口，将挂载时机从「入场动画结束（~1s）」推迟到「首次滚动 / 3.5s 兜底」。挂载会**同步 appendChild 重组 body 子元素**（一次全量重排长任务），扰动滚动几何；挂载推迟后正好撞上「刷新后滚动位置已恢复到底部」的状态，重组导致滚动位置被钳制/微调，跳动变得可见（挂载在 ~1s 早期时用户尚未滚远，几乎无感）。
+
+- **修复**（`src/scripts/app.ts` 的 `initCustomScrollbar`）：
+  - `runWhenIdle` 区分触发源：`wheel`/`touchmove`/`keydown` 传 `fromInteraction=true`，3.5s 兜底定时器传 `false`。
+  - `mount` 仅在**自动兜底触发**（`fromInteraction=false`，用户未在滚动）时保护滚动位置——挂载前记录 `window.scrollY`，挂载完成后下一帧（等 OS 完成初始布局）若偏差 `> 1px` 则 `scrollTo` 恢复，消除跳动。
+  - 用户主动滚动触发时**不恢复**：wheel 的默认滚动发生在事件处理返回之后，此刻恢复会把用户刚滚到的位置拉回滚动前，反成新跳动。
+
+- **性能不变**：保留 3.5s 懒挂载，mount 长任务仍在 TTI 之后，不回退 1.3.9 的性能优化。
+
+## [v1.3.30] - 2026-09-04
+
+### 修复：朋友圈加载瞬间「先渲染单栏，再渲染双栏」闪烁（FOUC）
+
+- **现象（用户「观感不流畅，加载的瞬间先渲染单栏，再渲染双栏」）**：1.3.29 的 `.friends-timeline` 默认是 `flex-direction: column`（单栏），双栏由 `friends.bundle.js`（defer 脚本）在首帧渲染后才加 `.masonry-active` 切换，导致首帧先显示「30 张卡片竖排单栏」、再跳成两栏，观感闪烁。
+
+- **根因**：defer 脚本执行晚于浏览器首帧渲染；首帧时 CSS 还是单栏，双栏结构尚未建立。
+
+- **修复**（`src/styles/components.css`）：`.friends-timeline` 默认改用 **CSS columns 双栏兜底**——`column-count: 1`（移动）/ `2`（≥768px）+ `.friends-timeline-group { break-inside: avoid }`，让**首帧即按 columns 双栏渲染**（消除「单栏→双栏」跳变）；JS 就绪后 `rebuildMasonry` 加 `.masonry-active`（`display: flex` 覆盖 columns）切回 flex 两列 + 最短列优先瀑布流。因首帧 columns balance 与 JS 最短列优先在朋友圈卡片高度差异小的场景下分配结果接近，「columns 双栏→flex 双栏」的切换几乎无感；「加载更多」仍走 flex 增量追加、不重排。
+
+- **JS 无需改动**：`rebuildMasonry` 天然兼容——首帧无 `.friends-timeline-column`，它先空摘旧列、再加 `.masonry-active` 切 flex、按最短列优先重建。
+
+## [v1.3.29] - 2026-09-04
+
+### 朋友圈双栏改为「最短列优先」瀑布流（对齐首页文章卡片）
+
+- **需求（用户「能做到和首页文章卡片一样的瀑布流吗？要符合主题设计」）**：1.3.28 的「奇偶交替」只保证数量均衡，但朋友圈卡片高度不一（有无摘要、标题行数、日期分组头是否显示），奇偶交替会让一列偏高一列偏矮，观感不如首页文章列表的 masonry 瀑布流。
+
+- **修复**（`src/scripts/assets/friends.bundle.js`）：`rebuildMasonry` 的分配算法从「奇偶交替」改为**「最短列优先」（greedy shortest-column-first）**——每个 group 追加到当前 `offsetHeight` 较小的列（`offsetHeight` 已含列内子元素与 gap，append 后即时更新），高度不一的卡片自然均衡到两列、两列齐平，视觉对齐首页 `post-list-layout.js` 的 masonry 算法。
+
+- **保留**：仍为 flex 两列（非绝对定位）——朋友圈卡片头像固定 48px、无封面图，卡片高度由文本决定且加载前后稳定，无需首页那样「绝对定位 + 封面图 load 重排」；`<768px` 单列铺平、resize 跨断点重建、Swup 重执行守卫、`groups` 原始顺序数组重建等 1.3.28 机制均不变。
+
+## [v1.3.28] - 2026-09-04
+
+### 修复：朋友圈双栏布局「加载更多」只加载右边一列
+
+- **现象（用户反馈「朋友圈页面加载不合理，双栏布局。只加载右边的，观感不好。」）**
+  - 首批可见 30 条在左右两列分布均衡（左 13 / 右 17），但点击「加载更多」后第二批 23 条**全部堆到右列、左列纹丝不动**（实测 `batch2Left:0, batch2Right:23`）。
+
+- **根因**：`.friends-timeline` 原先用 CSS `columns: 2` 的 masonry（`column-count`），浏览器的**列平衡（column balancing）按 DOM 顺序「连续分段」**分配多列——首批 30 个 group 恰好填满第一段后被两列平衡；「加载更多」新增的第二批 group 在 DOM 顺序上靠后，被列平衡算法整体续排到右列末尾，左列不补位。
+
+- **修复**（`src/scripts/assets/friends.bundle.js` + `src/styles/components.css`）：
+  - 弃用 CSS columns，改为 **flex 两列 + JS 手动按原始索引奇偶交替分配**：`.friends-timeline` 默认单列（无 JS 兜底），桌面（`window.innerWidth >= 768`）加 `.masonry-active` 并创建左右两个 `.friends-timeline-column`，把可见 group 按 `i % 2` 交替 append 进两列——新增内容自然分散左右，不再「只加载右边」。
+  - `rebuildMasonry` 以 init 时捕获的原始顺序 `groups` 数组为准重建（不依赖当前 DOM 顺序），可反复调用；`<768px` 时单列铺平恢复原始顺序。
+  - `updateDisplay`（分批隐藏/显示）末尾统一调用 `rebuildMasonry`，加载更多、resize 跨断点都会正确重建。
+  - resize 监听用 `window.__etherealFriendsMasonryResizeBound` 全局守卫只注册一次，避免 Swup 换页重执行脚本时监听累积；`setup` 每次重查 DOM 防闭包引用旧页面元素。
+
+## [v1.3.27] - 2026-09-04
+
+### 修复：刷新后「首次点击菜单/分类失效，约 4 秒后恢复」的真正根因
+
+- **现象（用户澄清「刷新之后只有滚动一下才能点击正常跳转」→「大概 4 秒钟后可以第一次点击成功，4 秒钟前不行」）**
+  - 刷新后立即点击顶部导航菜单或分类栏任何链接都失效，约 4 秒后首次点击才成功。此前误判为「第二次点击成功」「滚动一下才能点」，实为同一现象的不同触发方式。
+
+- **真正根因**：`app.ts` 的 `initCustomScrollbar()` 用 `runWhenIdle` 把 **OverlayScrollbars 初始化**延迟到「首次用户交互」或「固定 3.5s 兜底」。首次交互包含 `pointerdown`（点击按下）——用户刷新后首次**点击**菜单时，`pointerdown` 触发 OverlayScrollbars 初始化，**同步 appendChild 移动全部 body 子元素**（包裹进滚动容器 viewport），干扰了同一次点击的 click 事件处理 → 点击失效。3.5s 兜底（叠加动态 `import("overlayscrollbars")` 的加载时间 ≈ **4 秒**）后 mount 完成、DOM 稳定，点击恢复。
+
+- **为何 1.3.26 未解决**：1.3.26 的 `loadOnIdle: false` 只是让 Swup 同步初始化（消除 `requestIdleCallback` 延迟），但真正的「点击失效」来自 OverlayScrollbars 初始化时的 DOM 移动，与 Swup 初始化时机无关。
+
+- **修复**（`app.ts`）：`runWhenIdle` 移除 `pointerdown` / `touchstart` 触发（点击/触摸不再触发 mount），改为 `wheel`（桌面滚轮）/ `touchmove`（移动端触摸滚动）/ `keydown`（键盘）+ 3.5s 兜底。点击不再触发 DOM 移动，首次点击即正常；滚动/键盘/兜底仍保证 OverlayScrollbars 最终初始化。
+
+- **验证**：agent-browser 环境原生滚动条为 overlay（`scrollbarGap=0`），被 `cancel: { nativeScrollbarsOverlaid: true }` 取消初始化，故此前在该环境永远测不出此 bug（`window.swup` 就绪 + 点击成功）；用户 Windows 经典滚动条环境（`scrollbarGap≈17`）正常初始化，可复现。
+
+## [v1.3.26] - 2026-09-04
+
+### 修复：刷新页面后「首次点击菜单/分类跳转失败，第二次才成功」
+
+- **现象（用户反馈「刷新页面之后，点击第一个菜单跳转都无效，顶部菜单栏和下面的分类栏都一样，第二次之后都跳转成功了」）**
+  - 页面加载/刷新后，第一次点击顶部导航菜单或分类栏的任何链接都无跳转反应，第二次点击才正常
+
+- **根因**：`@swup/astro` 的 `loadOnIdle` 选项**默认为 `true`**，生成的 Swup 初始化脚本通过 `onIdleAfterLoad(initSwup)` 延迟执行——即「等 `load` 事件 + `requestIdleCallback`（且**无 timeout 兜底**）后」才 `new Swup` 并挂 `window.swup` / `clickDelegate` 事件委托。刷新后若浏览器一直未进入空闲（或空闲时机晚于用户第一次点击），`window.swup` 尚未就绪，分类栏兜底逻辑 `if (window.swup) ... else location.href` 与 Swup 事件委托都拿不到实例，首次点击导航失效；第二次点击时 swup 已初始化完成才恢复。
+
+- **修复**（`astro.config.mjs`）：在 `swup({...})` 配置中显式加 `loadOnIdle: false`，让 `@swup/astro` 改为**同步静态 import** Swup + 插件，脚本末尾直接 `initSwup()`（`new Swup` + `window.swup = r`），不再等待 `load`/空闲。构建产物 `page.C67wxfCi.js` 末尾为 `window.swup=r}pe();`，不含 `requestIdleCallback`/`onIdle`/`load` 监听，首屏 DOMContentLoaded 前即就绪。
+
+- **结果**：刷新后首次点击菜单/分类即可正常跳转（真实浏览器验证：`/` → 首次点击 `/categories` 即成功跳转，`window.swup` 为 `object`）。
+
+## [v1.3.25] - 2026-09-04
+
+### 修复：番剧 tab 切换「先变白」+ 朋友圈「加载更多」按钮消失
+
+- **番剧页白屏闪烁（用户反馈「点击按钮跳转，下面的番剧图先变白然后跳转」）**
+  - **现象**：tab 切换瞬间，框三整块番剧网格先变白（透明度降到 0）+ 下沉 2rem，再淡入新内容
+  - **根因**：1.3.24 引入的入场动画 `bangumi-list-enter{opacity:0} + fade-in-up(translate:0 2rem)`——切换时整个 `#bangumi-list` 先变纯白再下移淡入，被感知为「先变白再跳转」
+  - **修复**（`src/pages/bangumis.astro`）：彻底删除所有 opacity/translate 过渡动画类（`bangumi-list-loading` / `bangumi-list-enter` 及对应 keyframes），点击即 `setActiveTab + pushState` 即时反馈，fetch 完成直接 `innerHTML` 替换，无任何退场/入场动画；图片加载期由 `bg-(--btn-regular-bg)` 兜底，不再整块白
+
+- **朋友圈「加载更多」按钮消失（用户反馈「页面最下方没有加载更多按钮」）**
+  - **现象**：朋友圈底部没有「加载更多」按钮，动态只显示前 20 条
+  - **根因**（两层）：
+    1. **配置默认值自相矛盾**：`settings.yaml` 里 `fetchLimit`（拉取总条数）默认 20，`pageSize`（每次加载数量）默认 30，`fetchLimit(20) < pageSize(30)` → 只拉 20 条 → load-more 显示条件 `current < groups.length`（20 < 20）永不成立 → 按钮隐藏
+    2. **旧配置结构未迁移**：`ac8bf5f`（v1.3.0 起）把 `friends` 设置从顶层 Tab 合并进 `extendPages` 分组后，`friends.astro` 只读 `theme.config.extendPages.friends.*`，但存量 configMap 仍是顶层 `friends` 键（`extendPages` 为空 `{}`），导致 `extendPages.friends` 恒为 null、回落硬编码 `limit: 20`
+  - **修复**：
+    - `settings.yaml`：`fetchLimit` 默认 `20 → 60`，help 注明「必须大于每次加载数量，否则按钮不显示」
+    - `src/pages/friends.astro`：配置读取改为向后兼容——`friendsCfg = extendPages.friends ?: friends`，`fetchLimit`/`pageSize`/`blacklist`/`enable_random_fish` 统一从 `friendsCfg` 读，且 fetchLimit 硬编码回落从 `20` 改为 `60`（与 settings.yaml 默认对齐）
+    - `src/layouts/MainGridLayout.astro`：随机钓鱼按钮门控的 `enable_random_fish` 同样改为向后兼容读取
+  - **结果**：朋友圈渲染 60 条动态，60 组 > pageSize 30 → 「加载更多」按钮正常显示，点击分批展开剩余 30 条
+
+## [v1.3.24] - 2026-09-04
+
+### 修复：朋友圈两栏布局「单列右空」+ 番剧页 tab 按钮响应慢
+
+- **朋友圈布局（用户反馈「布局都乱了」）**
+  - **现象**：1.3.23 改 grid 双栏后，日期头 `grid-column:1/-1` 强制满宽断行 + 大多数日期组只有 1 条动态，导致右列 100% 空，整页看似单列布局「碎了」
+  - **根因**：CSS Grid 的满宽日期头与稀疏单条日期组在「双栏视觉」上本质矛盾——断行后每组只填左列、右列空，无法靠 grid 的 align-items:stretch 掩盖
+  - **修复**（`src/pages/friends.astro` + `src/styles/components.css` + `src/scripts/assets/friends.bundle.js`）：改用 **CSS columns 双栏 masonry**——`column-count:2`（≥768px）天然平衡变高卡片；每 (date + row) 包成 `.friends-timeline-group` 配 `break-inside:avoid`，保证日期与卡片不被分到两列；日期头改为左色条 + 日历图标的列内紧凑分组头；load-more 改为隐藏整组（`group.style.display`），避免日期孤儿；group/blacklist 脚本在 row 被合并/移除后清理空 group
+  - **结构变化**：`friends.astro` 的内层 `th:with` div 去掉 `th:remove="tag"`、加 `class="friends-timeline-group"`（每条动态一个真实包裹）
+
+- **番剧页按钮响应（用户反馈「按钮响应很慢」）**
+  - **现象**：tab 点击后内容「消失再出现」，整体感知约 400-500ms，按钮发滞
+  - **根因**：`loadArchive` 串行做了 200ms 退场淡出+下沉（`bangumi-list-exit`）+ 200ms 入场（`bangumi-list-enter`），让 ~280ms 的 fetch 夹在两段动画中间显得很慢；点击到首次视觉变化虽然即时开始退场，但用户主观把「200ms 整块淡出」算成响应耗时
+  - **修复**（`src/pages/bangumis.astro`）：改为**点击即 `setActiveTab + pushState` 给即时反馈**（tab 高亮 + URL 同步瞬时完成），fetch 期间内容保持可见只轻微变透明（`bangumi-list-loading` 透明度 0.55，150ms 平滑过渡，禁点击），不再整块退场；fetch 完成后换 innerHTML + 重播 150ms `fade-in-up` 入场；移除 `transitionend` + 400ms 兜底定时器（已不需要等退场）。fetch 是硬下限（~280ms）无法压缩，但点击到「有反馈」从 ~200ms（等退场结束）压到 0ms，主观响应感显著提升
+
+## [v1.3.23] - 2026-09-04
+
+### 优化：番剧页计数行移至框三 + 朋友圈改双栏网格布局
+
+- **番剧页计数行下移（参考 Firefly bilibili 页）**：框一 PageHeader 改回静态（无计数/筛选徽章），把「共 N 部」+「已筛选」徽章移到框三顶部（`#bangumi-list` 内），随局部 PJAX 整体替换自动更新；删除 `syncHeader()` 跨框同步逻辑
+- **朋友圈改双栏**：`flex` 纵向时间轴（带虚线/圆点）改为 `display:grid; grid-template-columns:repeat(2,1fr)` 桌面双栏、移动单列；日期头 `grid-column:1/-1` 跨两列；卡片直接作为 grid item（去掉 col-line/col-card 包裹层）
+
+### 修复：overlayscrollbars 挂载兜底改固定延迟，彻底移出 TBT 窗口
+
+- **现象**：1.3.9 用 `requestIdleCallback(run)`（无 timeout）做兜底，但实测仍会在主线程**首个空闲点**触发挂载——19:16 / 19:17 两份报告中 overlayscrollbars 长任务分别落在 1.66s / 2.68s，都在 FCP→TTI 的 TBT 窗口内，长任务未真正消除
+- **根因**：Lighthouse 4x CPU 节流下主线程总会有空闲间隙，`requestIdleCallback` 无 timeout 只是「不强制在 1.5s」，不等于「延到 TTI 之后」
+- **修复**（`src/scripts/app.ts` `runWhenIdle`）：去掉 `requestIdleCallback` 兜底，统一改为「首次用户交互（pointerdown / wheel / touchstart / keydown）触发 + `setTimeout(run, 3500)` 固定延迟兜底」。3.5s 远在 TTI(~1.7s) 之后，且 Lighthouse 不模拟交互，故该长任务在报告中彻底消失；等待期间原生滚动条正常工作，切换不可感知
+
+## [v1.3.9] - 2026-09-03
+
+### 优化：自定义滚动条挂载延后到「首次交互 / 主线程空闲」，移出 TBT 统计窗口
+
+- **现象**：Lighthouse 主线程明细中 overlayscrollbars 挂载是首页一次 ~127ms 的归因长任务（start ~1687ms，仍落在 FCP→TTI 的 TBT 统计窗口内），拉高 TBT
+- **根因**：旧逻辑用 `requestIdleCallback(task, { timeout: 1500 })` 错峰，`timeout` 会在主线程持续忙碌（图片解码 / 内联脚本执行）时**强制**把挂载塞进忙窗口执行，成为长任务；自定义滚动条纯属装饰，无需抢首屏
+- **修复**（`src/scripts/app.ts` `runWhenIdle`）：挂载时机改为「首次用户交互（pointerdown / wheel / touchstart / keydown）或 `requestIdleCallback` 真正空闲」二选一，去掉 `timeout` 强制；Lighthouse 不模拟交互，故交互触发在报告中不再出现，空闲兜底也会自然落在忙期之后。Safari 无空闲回调时退化为 3s 延迟（原为立即执行）。原生滚动条在等待期间正常工作，切换不可感知
+
+## [v1.3.8] - 2026-09-03
+
+### 修复：首页 banner 冗余 `<link rel=preload>` 触发「preloaded but not used」警告
+
+- **现象**：Lighthouse 报首页 banner 图 `<link rel=preload>`「preloaded but not used」——SSR 固定预加载亮色壁纸 `srcX`，但暗色模式下 `banner-theme-switch.js` 会把 `<img>.src` 切到 `data-theme-src`（暗色壁纸），亮色 preload 永不使用
+- **根因**：主题暗色是 `html.dark` 类切换（后台默认 / 手动开关 / 自动模式驱动），而 `<link rel=preload>` 的 `media` 只能匹配媒体查询、匹配不了类——无法用 `media="(prefers-color-scheme: dark)"` 正确门控（只在「自动模式 + 系统深色」时命中，手动/默认暗色仍失效）
+- **修复**（`src/layouts/MainGridLayout.astro` + `src/utils/image-suffix.ts`）：移除冗余的 banner `<link rel=preload>` 及仅供它使用的 `carouselHasImg` / `carouselFirst` / `carouselFirstSrcX` 局部变量。banner `<img>` 本身已带 `loading=eager` + `fetchpriority=high`（单图与轮播首图均是），预加载扫描器可直接发现并高优先级拉取，preload 完全冗余；删掉后警告在亮 / 暗 / 手动全部场景消失，LCP 影响可忽略
+
+## [v1.3.7] - 2026-09-03
+
+### 修复：banner_width=0 仍显示 `?w=0`（字符串 `"0"` 类型陷阱，1.3.6 修复未生效的根因）
+
+- **现象**：部署 1.3.6 并后台设 `banner_width=0` 后，线上首页 banner 仍输出 `?w=0`。实测 DB（`/registry/configmaps/Ethereal-configMap`）中 `banner_width` 存储为 **字符串 `"0"`**——Halo 后台 FormKit 的 `number` 字段以字符串形式落库
+- **根因**：主题 Thymeleaf 表达式里 `w == 0` 是整数比较，SpEL 对 `String "0" == Integer 0` 判 `false`，导致 `CDN_SUFFIX_RAW` 首条短路与 `w0Strip()` 的剥离分支双双失效；`suffix` 走 `provider == 'lsky' ? '?w=' + w` 拼出 `?w=0`。1.3.6 的 `w0Strip` 逻辑本身正确，但被 `w == 0` 这个类型陷阱挡在门外
+- **修复**（`src/utils/image-suffix.ts`）：新增统一判定常量 `W_IS_ZERO = "(w == 0 or w == '0')"`，同时兼容数字 `0` 与字符串 `'0'`，并替换 `CDN_SUFFIX_RAW` 与 `w0Strip()` 两处 `w == 0`。因 `CDN_SUFFIX_RAW` 为 banner / 卡片封面 / 文章图 / 头像四路宽度共用，此修复一并覆盖 `card_cover_width` / `article_image_width` / `avatar_size` 设为 0 时的同类隐患
+
+## [v1.3.6] - 2026-09-03
+
+### 修复：banner_width=0（原图）时剥离 src 自带的 `?w=0` 冗余后缀
+
+- **现象**：后台图片处理宽度设为 0（期望原图）时，首页 banner 的 `<img>` / `<link rel=preload>` / 暗色壁纸 URL 仍出现 `?w=0`。根因是 Lsky 图床原图链接默认就带 `?w=0`，用户 banner src / darkSrc 配置里复制的是这份 URL；主题 CDN 后缀逻辑（`CDN_SUFFIX_RAW` 首条 `w == 0 ? ''`）本就保证 w=0 时不追加后缀，但 src 自带的 `?w=0` 会原样透传到最终 URL
+- **修复**（`src/utils/image-suffix.ts`）：新增 `w0Strip()` 辅助，banner 全链路 URL 生成统一改走它——单图 `srcX`/`darkSrcX`（`bannerMediaVars`）、轮播首图 `carouselFirstSrcX`（`bannerThWith`）、轮播逐张 `carouselImgSrcExpr` / `carouselDarkImgSrcExpr`、移动端复用 `bannerMediaVars`。当 `w == 0` 时经 `#strings.replace` 剥离 `?w=0` 与 `?width=0`（Lsky/Halo 两种原图标记），非 0 时沿用原「src + (可加后缀 ? suffix : '')」逻辑不变
+
+## [v1.3.5] - 2026-09-03
+
+### 性能：`#main-grid` CLS 修复（0.097 → 目标 <0.05）
+
+Lighthouse 13.4.1（2026-09-03 12:29 桌面档）对 `www.lqbby.com` 的审计报 CLS **0.097**，其中 `#main-grid`（2697×1496 巨型网格）一项贡献 **0.096（99.4%）**。
+
+- **`transition: all` 是元凶**：`MainGridLayout.astro` 的 `#main-grid` 类串长期带 `transition duration-[var(--dur-banner,700ms)]`（即 `transition-property: all`），首次绘制后任何布局属性（`top` / `min-height` / `grid-template-*`）变化都会被动画化 700ms，期间浏览器每帧重排一次巨型元素，被 Layout Instability API 计入 CLS 会话窗口
+- **去掉 Tailwind `transition duration-...`**（MainGridLayout.astro）：首帧与运行期不再有过渡开销，CLS 巨型位移不再每帧计入
+- **显式补回 `transition: translate`**（components.css）：Tailwind 的 `transition` utility 默认 `transition-property` 不含独立 `translate` 属性（只含 `transform`），所以 `home-switch` 时网格 `translate: 0 var(--banner-height-extend)` 的同帧切换**原来就不靠 Tailwind 类**——靠的是 `#main-panel-wrapper` 的 `html.home-switch` `top` transition（L300-303）。但为防御万一与保持显式，CSS 显式声明 `transition: translate var(--dur-banner, 700ms) cubic-bezier(0.4, 0, 0.2, 1)`
+- **`html:not(.page-ready)` 首帧禁用**（components.css）：复用 `#wave-container` 已用的同款范式（L370-372）。`translate: none` ↔ 长度值不可插值（CSS Transforms 2），首帧启用过渡会形成瞬移；同时首帧 `--banner-height-extend` 从 vh 兜底切到 JS px 时，禁用过渡可避免该过渡被纳入 CLS 计分窗口。`app.ts` 双 rAF 后加 `page-ready` 恢复
+
+### 无障碍：Lighthouse axe-core 92 → 100（三处全部修复）
+
+- **`#back-to-toc-btn` `aria-allowed-attr`**：原脚本 `syncTocBtnState()` 把 `aria-expanded` 写到外层 `<div id="back-to-toc-btn">`（`getTocBtn()` 返回 div），div 无隐式 role，挂 `aria-expanded` 触发 axe 违规。改为写到内层 `<button>`（SSR 已正确写在 button 上）—— class 仍在 div（CSS `.toc-active` 在外层），运行时与首屏一致
+- **`.home-moment-link` `target-size`（520.7×20，需 ≥24×24）**：补 `min-h-[24px]`，使跑马灯条目点击区高度达标
+- **`a.btn-regular`「更多」`target-size`（70×32，最小可点空间被压到 70×6）**：根因是 CSS 绘制顺序——`#home-moments-marquee` 是 `position: relative`（Group 3：positioned），`.home-moment-link` 是 static（Group 2）但被父级提到 Group 3 一起绘制；而「更多」是 Group 2，画在 marquee **下面**，跑马灯链接的 bounding rect（axe 忽略 `overflow:hidden` 裁剪）就把按钮压到只剩 6px 安全区。现给「更多」加 `relative z-10`（Group 4：positioned + z-index），按钮升到顶层，安全区恢复完整 70×32
+
+## [Unreleased]
+
+### 性能：评论区与图片灯箱懒加载（首屏 JS -~200KB）
+
+- **comment-next.iife.js（120KB，45% 未用）随 HTML 立即执行**：`<halo:comment>` 由 Halo 服务端注入脚本，而评论区在文章/瞬间/单页/友链/图床页的首屏之下。现把注入产物包进 `<template id="comment-lazy-template">`（内容惰性：脚本不下载、web component 不升级），由 `app.ts` 的 IntersectionObserver 在评论区接近视口（提前 400px）时把内容搬到占位节点激活；无 IO 老内核退化为立即加载，Swup 换页后按新 DOM 重新绑定
+- **PhotoSwipe 全家桶（~80KB）每次 page:view 都 eager 初始化**：首屏几乎从不点击图片。现改为武装一个 capture 阶段的轻量委托监听，click 真正命中图库图片（`.custom-md img` / `#post-cover img` / `.moment-media img` / `#photo-detail-image`）时才动态拉起 PhotoSwipe 并重放本次 click 开图；拦截时 `preventDefault` 避免图片被链接包裹时的意外跳转。相册页（photos-gallery）保持原 eager 逻辑不变
+
+### 修复：音乐播放器封面降采样对 Meting 代理地址不生效
+
+- **播放列表封面白耗约 1 MiB 传输**：`MusicPlayer` 的 `picWithParam` 此前只识别网易云直链的 `?param=WxH` 参数，而歌单接口返回的是自建 Meting 代理地址（形如 `.../api?server=netease&type=pic&id=xxx&auth=xxx`，**不含 `param`**），正则不命中，代理便无条件 302 到 `?param=300y300`——18 首歌的列表封面实测共 1072 KiB，而屏幕上只显示 32px。现补充代理形态识别：URL 命中 `type=pic` 时通过 `URL.searchParams` 追加 `&size=N`（`auth` 原样保留；服务端自 2026-09-03 起已放行 `size` 参数，鉴权串由 `server+type+id` 计算、不含 size，故既有链接照常有效）。实测封面体积降 **92%**（`300y300` → `100y100`），首页约省 986 KiB。网易云直链、站内相对路径、图床地址的处理均维持原样
+
+### 修复：CI 类型检查失败（astro check 4 errors）
+
+CI 的 `pnpm check` 步骤此前报 4 个错误，均为历史遗留、与近期改动无关：
+
+- **X5 兼容改动误留指令值**：提交 `22edba2`（X5 老内核下语言/亮暗/搜索按钮可见可交互）把
+  `Navbar.astro` 的 Search / LanguageSwitch / LightDarkSwitch 由上游的 `client:only="svelte"`
+  改为 `client:load` 以参与 SSR（否则 hydration 失败时按钮直接消失），但**误将 `="svelte"` 留在
+  了 `client:load` 后面**。`client:load` 是布尔指令、不接受值，导致 `ts(2769)` 类型错误。
+  现去掉该值：SSR 行为不变、X5 兼容效果保留，类型检查通过
+
+- **`scripts/rasterize-pattern.mjs` 缺 `@resvg/resvg-js`**：一次性构建工具（把 SVG 纹理预渲染为
+  PNG，产物 `pattern-*.png` 已提交），不参与 CI 与 astro build。该依赖是原生二进制，仅重新生成
+  纹理时才需要；为它常驻 `devDependencies` 会无谓拖慢 CI 安装，故关闭本文件的类型检查并加注释说明
+
+### 魔改：移动端菜单触控优化
+
+- **触控区域放大到 44px 标准**：移动端菜单（手风琴样式）此前展开箭头按钮仅约 37 × 37 px、菜单行高约 40px，均低于移动端 44px 最小触控标准，容易点空或误触跳转。现将箭头按钮改为固定 `h-11 w-11`（44 × 44）、菜单行与子菜单项内边距由 `py-2` 提升至 `py-3`（行高约 48px），面板宽度由 `w-40`（160px）加宽到 `w-48`（192px）
+
+- **新增「移动端菜单整行展开」开关**（主题设置 → 魔改开关）：开启后，有子菜单的项点击整行任意位置即展开/收起子菜单，符合手风琴直觉、大幅降低误触；关闭则维持原版行为（仅右侧箭头可展开，点击文字跳转）。**注意开启后父项自身链接将无法直接访问**，如有需要请在子菜单里补一条对应条目。默认关闭
+
+### 移植上游 v1.2.2-rc-3 / rc-4（Helio-RC db31f51 / c31267c）
+
+历史已与上游连通，以下改动为**直接 cherry-pick**，与上游逐字节一致（`Search.svelte`、`photo.astro` 已零差异）：
+
+- **照片详情页首尾照片提示 (#62)**：图库详情页处于第一张/最后一张照片时，上一张/下一张按钮原本空白无提示，现补充提示文案，与文章页提示体验保持一致
+
+- **照片详情页无 EXIF 提示 (#63)**：照片无 EXIF 信息时补充「此照片无 EXIF」提示，避免信息区空白
+
+- **移动端搜索结果标题错位 (#64)**：修复窄窗口下搜索结果标题因 `inline-flex` 默认不换行而溢出、箭头图标错位的问题
+
+- **搜索结果摘要显示 HTML 标签文本 (#64)**：修复搜索摘要中正文的 HTML 标签（如 `<strong>`）被当作字面文本显示的问题，现将其替换为空格，仅保留搜索高亮标记
+
+### 移植上游 v1.2.2-rc2（Helio-RC e2ea7f5 / 145a0ce）
+
+- **公告栏支持写入 HTML (#55)**：公告内容新增「内容呈现为HTML」开关与「内容最大高度(px)」设置（默认 640，范围 40–1024）。开启后内容按 HTML 渲染（`th:utext`）且高度由内容自身决定，仅以上限约束、超出部分内部滚动，防撑破侧栏；关闭时按纯文本转义（`th:text`），维持原有行为。**此项取代本地此前无条件改用 `th:utext` 的改动**（提交 a71efcd），冲突处一律采用上游原版实现
+
+- **移动端搜索框聚焦后未占满宽度 (#58)**：移动端搜索面板输入框误用桌面端 `focus:w-60` 定宽，聚焦后反而缩窄并出现空白，已移除
+
+- **回退三栏布局右侧栏空态自动收列 (#33)**：删除 `rightSidebarHasContentExpr` 空态判定与 `th:with` 作用域提升包裹层，布局类改回直接读 `theme.config.layout.pageLayout.layoutMode`；三栏模式下右侧栏为空时不再自动切换两栏，保持布局一致性，目录组件可正常使用
+
+### 修复
+
+- **分类导航栏滑块高亮溢出 (#52)**：`.category-scroll` 增加 `position: relative`，修正 `scrollPillIntoView` 的 `offsetLeft` 基准（此前相对整个 track，窄屏下过度滚动）；`moveLiquid` 与滚动区可见窗口求交集：半露只铺可见段、完全滚出时隐藏，防止液态滑块（滚动区兄弟节点、不受 `overflow`/`mask` 约束）底色溢出到相邻 pill / 分隔线
+
+## [v1.2.0] - 2026-08-23
+
+> 呀呼！欢迎使用 **Ethereal 主题 v1.2.0** 版本
+>
+> 本次更新带来前台多语言切换、时间轴与技能页面、追番插件页面适配等重大功能更新，后台设置合并「扩展页面」分组，并带来三栏布局空态收列、移动端目录弹窗等体验优化
+>
+> 如在主题使用中遇到问题或者建议，欢迎在 [Issue](https://github.com/AloneNanNan/halo-theme-ethereal/issues) 中提交。也可前往 [主题交流群](https://qm.qq.com/q/onMpJjYvgQ) 进行讨论
+
+### Tips
+
+- 更新后建议前往「主题设置 → 详细」进行 重载主题配置 & 清除模版缓存 两项操作，确保新设置项正常生效
+
+### 新增
+
+- **前台语言切换面板**：导航栏新增语言切换按钮，访客可实时切换 简体中文 / 繁體中文 / English 三语界面（会同步后台界面语言），并补齐全站 i18n 词条覆盖；可在「主题设置 → 布局设置 → 菜单栏设置 → 语言切换」控制按钮显示，并在「主题设置 → 样式设置 → 主题语言」配置访客未手动切换时的默认语言
+
+- **时间轴与技能页面**：新增时间轴与技能两个页面模板，支持条目分组筛选与自定义内容展示（教育经历 / 工作经历 / 项目经历等类型）；可前往「主题设置 → 扩展页面」关联自定义页面并配置 by @Leave-Time in #27
+
+- **追番插件页面适配**：新增适配 [追番插件](https://www.halo.run/store/apps/app-OTFPN) 页面，支持类型与状态双维筛选、分页，B 站式竖版封面卡片（渐变覆盖信息、评分角标、追番/播放/弹幕/硬币四项统计），可安装后体验 #28
+
+- **移动端目录悬浮按钮与目录弹窗**：当页面无可见目录时，右下角显示目录悬浮按钮，点击呼出 TOC 弹窗，按钮图标随弹窗状态切换；可在「主题设置 → 布局设置 → 浮动导航按钮」开启 #29
+
+- **菜单栏自定义图标与 Logo**：菜单项支持在 Halo「菜单管理」中为每个一级菜单配置 Iconify 图标；菜单栏设置新增 Logo 上传项，留空回退主题默认图标
+
+- **分类导航栏组件**：新增水平滚动 pill 导航栏（首页 / 归档 / 分类 / 全部分类），液态滑块跟随高亮；可在「主题设置 → 布局设置 → 页面布局 → 分类导航栏」开启
+
+### 优化
+
+- **三栏布局右侧栏空态收列**：三栏布局下右侧栏无组件时，整页自动按两栏模式渲染（收起第三列），避免空栏占位；空态文章页目录改走两栏浮动目录 by @Helio-RC in #33
+
+- **分组页筛选交互统一**：抽取分组页页头与筛选标签公共组件，统一友链 / 装备 / 瞬间 / 相册 / 作品集 / 技能 / 时间轴七个分组页的筛选标签尺寸与视觉，「已筛选」徽章全站统一
+
+- **后台设置迁移**：「朋友圈」相关设置迁移至「扩展页面」Tab，设置层级更清晰
+
+- **天气 Key 配置说明**：腾讯位置服务 Key 的配置提示补充配额分配说明 #30
+
+### 其它
+
+- 版本号提升至 v1.2.0
+
+- README 优化 by @Helio-RC in #43 #44
+
+- 依赖升级：astro 7.2.1 → 7.2.3 by @dependabot[bot] in #34；npm 依赖组批量更新 by @dependabot[bot] in #41
+
+### 新贡献者
+
+- @Leave-Time 在 #27 中完成了他们的首次贡献
+
+**变更完整日志**: https://github.com/AloneNanNan/Halo-Theme-Ethereal/compare/v1.1.2...v1.2.0
+
+## [v1.1.2] - 2026-08-17
+
+### Tips
+
+- ⚠️⚠️⚠️ **更新必读**：本次为破坏性更新，已保存的大部分主题设置会丢失，升级后需重新配置。受影响的设置项：Banner 布局、Banner 样式、标题与副标题、动画速度、欢迎弹窗、菜单、页面布局、文章卡片布局、菜单栏设置（含菜单样式/固定菜单栏/配色切换/访客样式切换）、浮动导航按钮、配色切换开关
+- 更新后建议前往「主题设置 → 详细」进行「重载主题配置」与「清除模版缓存」两项操作，确保新设置项正常生效
+
+### 新增
+
+- **Halo 2.26 页面布局契约模板适配**：新增 `layout.astro` 契约模板，供插件自有前台页面复用主题外壳，含样式顺序对齐、PAGE_WIDTH 常量与动画配置优化
+- **后台设置重组**：新增「布局设置」设置页，将分散在多个页面的布局类设置集中管理；「基础设置」页删除，Banner 样式/标题与副标题/动画速度迁入「样式设置」页；详细迁移清单见下方 **设置项迁移**
+
+### 设置项迁移
+
+⚠️⚠️⚠️ 本次为破坏性更新，以下设置项因组键变更，升级后配置将回落默认值，需用户重新配置。
+
+| 设置项       | 原位置   | 新位置                       |
+| :----------- | :------- | :--------------------------- |
+| Banner 布局  | 基础设置 | 布局设置                     |
+| Banner 样式  | 基础设置 | 样式设置                     |
+| 标题与副标题 | 基础设置 | 样式设置                     |
+| 动画速度     | 基础设置 | 样式设置                     |
+| 欢迎弹窗     | 基础设置 | 布局设置                     |
+| 菜单         | 基础设置 | 布局设置                     |
+| 页面布局     | 侧边栏   | 布局设置                     |
+| 文章卡片布局 | 文章     | 布局设置                     |
+| 菜单栏设置   | 样式设置 | 布局设置                     |
+| 浮动导航按钮 | 样式设置 | 布局设置                     |
+| 配色切换开关 | 样式设置 | 布局设置                     |
+| 固定导航栏   | 样式设置 | 布局设置                     |
+| 基础设置全页 | —        | **已删除**，原有设置全部迁出 |
+
+升级后请前往「主题设置」对照上表逐项检查并重新配置。
+
+### 优化
+
+- **后台设置项重组**：基础设置 / 样式设置 / 侧边栏 / 文章四个设置页精简重构，设置层级更清晰；「样式」tab 更名「样式设置」
+  - 布局设置包含：页面布局、Banner 布局、文章卡片布局、菜单栏设置（菜单 / 移动端菜单样式 / 固定菜单栏 / 配色切换 / 访客样式切换）、浮动导航按钮、欢迎弹窗
+  - 样式设置包含：Banner 样式、标题与副标题、主题颜色、配色方案、样式开关、动画速度、外部字体
+  - 侧边栏保留：小组件设置、个人简介小组件、公告小组件
+  - 文章保留：版权声明、内容显示、目录、文章摘要、文章操作栏
+- **配色（深浅色）切换**：「允许访客切换配色」移入菜单栏设置并改名「配色（深浅色）切换」，控制导航栏明暗切换按钮的显示
+- **菜单栏设置**：「固定导航栏」更名「固定菜单栏」
+- **菜单下拉框**：菜单选择由 radio 改为下拉框（menuSelect）
+- **跨页切换性能**：拆分/重写跨页切换逻辑，改用浏览器原生平滑滚动，减少主线程阻塞 by @Helio-RC in #26
+- **悬浮目录**：优化二栏样式下的悬浮目录，当页面宽度不足时自动隐藏，避免目录显示异常
+
+### 修复
+
+- 修复 v1.1.1 修改导致的两栏模式下目录不可见问题 by @Helio-RC in #26
+
+### 其它
+
+- 版本号提升至 v1.1.2
+- **README 全面重写**：更新项目介绍、功能列表、安装说明，改版徽章
+
+## [v1.1.1] - 2026-08-16
+
+### 新增
+
+- **访客前台样式切换面板**：导航栏「主题色」切换面板升级为「显示设置」面板（外观 / 壁纸双分区），访客可实时切换主题色相、文章列表/网格布局、卡片样式（悬浮 / 磨砂 / 瀑布流）、壁纸模式，以及横幅波浪、首页壁纸标题等壁纸设置；开关位于「主题设置 → 样式 → 菜单栏设置 → 访客样式切换」，可逐项配置
+- **Banner 全屏与全屏透明模式**：新增 displayMode 显示模式开关（关闭/纯色、横幅、全屏、全屏透明），重构 Banner 高度体系与滚动落点；全屏透明模式下无横幅、整屏壁纸作为页面背景，配合「高级材质」使内容与组件卡片呈现磨砂透明效果，并可分别调节壁纸透明度、背景模糊度与卡片透明度
+- **文章页隐藏封面图开关**：新增文章页正文上方封面图显示开关，列表/卡片封面不受影响 [#20]
+- **网格封面高度自适应开关**：开启后封面自动拉伸填满卡片剩余高度，等高网格下同排封面等高、摘要下方不留白
+
+### 优化
+
+- **目录高亮重构**：高亮指示器改用主题色并同步动画速度档位，转场更平滑；二栏悬浮目录不再显示「此文章无目录」占位文案
+- Banner 相关设置项拆分为「Banner 布局」和「Banner 样式」两项设置组；原「固定色调」开关移入「访客样式切换」并更名为「主题色相切换」
+- 部分卡片样式、固定导航栏与网格细节显示优化
+
+### 修复
+
+- 文章卡片主题色装饰竖线与网格箭头未对齐标题 [#17] [#19]
+- 文章分享海报点击保存无反应 [#22]
+- 公告小组件 PC 端无法关闭 [#21]
+- 固定导航栏与文章卡片相关布局问题
+- 波浪与 Banner 浏览器兼容问题（Safari 首帧错位 / Edge 过渡缝隙），向下按钮独立于标题开关
+
+### 其它
+
+- 版本号提升至 v1.1.1，更新 release 与 README
+- 新增 AGENTS.md 开发约定文档，README 补充说明
+- 依赖升级：astro 7.2.0 → 7.2.1（补丁级更新） [#23]
+
+## [v1.1.0] - 2026-08-11
+
+### 新增
+
+- **网格布局**：新增网格文章布局，优化多种文章布局卡片显示效果
+- **移动端菜单抽屉样式**：菜单面板新增抽屉样式，支持手风琴/抽屉两种模式切换
+- **固定导航栏开关**：新增固定导航栏开关，菜单栏设置移入样式设置页并默认关闭欢迎弹窗
+- **入场欢迎卡片**
+- **Banner 视频/动图播放与多图轮播**：移动端独立图片来源，外部链接去重及相关修复 [#15]
+- **个人简介在线状态**功能
+- **动画速度三档设置**（舒缓/均衡/疾速/自定义），动画时长全面变量化 [#12]
+- **适配心愿便签插件**：新增心愿墙便签视框与发布交互
+- **适配日程日历插件**：新增配套最近日程小组件
+- GitHub Issue 模板（Bug / Feature / Enhance / Security / Help）
+
+### 修复
+
+- 音乐播放器 401、公告移动端不显示、页脚间距、移动端卡片悬浮效果及部分设置项优化 [#11] [#13]
+- 视频 Banner 宽度较窄时暂停按钮无法触发（Lighthouse 审计） [#16]
+- Banner 视频媒体控制与入场动画，消除移动端来源判定双实现
+- 移动端封面图不铺满卡片（显式锁定 calc 保留两侧边距），README 同步目录结构说明
+- 所有小组件装饰线未对齐标题
+- CodeQL 扫描告警（strip-html-comments 结束标签宽松匹配与未闭合注释处理、external-link-redirect 头像 URL 协议白名单）
+- lockfile 与 package.json 不同步；重新解析 lockfile 使 serialize-javascript overrides 生效（4.0.0 → 7.0.7，告警清零）
+
+### 其它
+
+- 版本号提升至 v1.1.0，更新 release 与 README
+- 系统 Git 升级至 2.50.1，lint-staged 恢复 17（PR 原版）
+
+## [v1.0.8] - 2026-08-07
+
+### 新增
+
+- **主题切换动画与交互**：基于 View Transitions API，4 种样式可配置；keyframes 数值化、跨平台适配与 wipe 优化，统一各平台行为并补充兼容性提示
+- **底部波浪效果三选开关**（关闭/开启/移动端关闭），移动端跳过动画省主线程
+
+### 修复
+
+- **可访问性**：键盘操作、ARIA、对比度提升；Label in Name、ARIA 菜单结构；搜索框补 id/name；首页 h1 兜底（banner 标题缺失时用隐藏站点名，消除 Swup 无障碍警告）
+- **安全面审计**：协议白名单、服务端排序、去重试、冷却 + honeypot、危险 scheme 黑名单（放行 ftp/blob 等无害协议）等
+- **性能/加载审计**：懒加载 + srcset、脚本门控、TOC IntersectionObserver、动画暂停等
+- 全局清理 Swup v3 死事件 `swup:contentReplaced`（18 处，v4 从未分发），消除换页脚本重执行导致的监听器累积与死事件残留
+- 右侧边栏换页重播入场动画（swup-visited 会话标记门控）、刷新闪烁、入场动画类改静态
+- 静态资源引用统一加版本指纹，避免 CDN 缓存失效；补全菜单面板 ARIA 语义
+- 回退正文图片 srcset，修复灯箱打开过小
+- 摘要打字机去除重复代码
+
+### 优化
+
+- 移除内联 onclick 改用事件委托，upvote 失败回滚、文章正文 noscript 降级
+- 版本号统一从 theme.yaml 读取，修复 ASSET_VERSION 构建期注入
+
+### 其它
+
+- 版本号提升至 v1.0.8，同步 README 截图与 QQ 交流群、CD 工作流权限
+- 统一 pnpm 版本
+
+## [v1.0.7] - 2026-08-04
+
+### 新增
+
+- 为缺少 meta description 的页面自动添加 description
+
+### 修复
+
+- 统一页面 title/OG 输出并修复头部结构问题
+- ASSET_VERSION 构建期注入，版本号统一从 theme.yaml 读取
+- 站点统计字数口径减少误差，热门文章改为全量拉取
+
+### 优化
+
+- 站点统计 / 资源加载 / 首屏 CLS
+- 站点统计图标统一为圆角风格，优化字数统计与小组件折叠逻辑
+
+## [v1.0.6] - 2026-08-03
+
+版本号提升至 1.0.6（git 历史中无功能变更记录）。
+
+## [v1.0.5.1] - 2026-08-03
+
+### 新增
+
+- **文章打赏功能**与操作栏设置项，优化按钮图标动效
+- **友情链接自助提交功能**，优化部分按钮样式与圆角
+
+### 修复
+
+- 旧版插件下 /links 页面崩溃
+- 消除外链模态框 XSS 注入
+
+### 优化
+
+- 分享海报与外链模态框显示，友链验证码与海报高度
+- 统一图片 CDN 后缀生成，合并右侧边栏重复代码
+
+### 其它
+
+- 版本号提升至 1.0.5.1
+- CD 工作流增加手动触发，支持按 tag 手动同步应用市场
+- 新增 Halo 应用市场同步工作流（仅同步，不构建）
+- README 更新小组件列表、项目结构及功能描述
+
+## [v1.0.4] - 2026-07-31
+
+### 新增
+
+- **公告小组件** & 一言 API 可配置 & 个人简介设置迁移 & 统一小组件边距
+- **主题署名开关**，优化移动端导航交互，修复安全风险
+- **文章分享海报**、按钮动效优化、卡片悬浮增强
+- **朋友圈页面重构**：新增朋友圈黑名单设置、友情链接页面随机跳转功能优化、兼容性改造
+- **卡片悬浮效果**：卡片悬停时轻微上移并显示主题色阴影
+- **自定义字体功能**，单页评论区跟随 Halo 设置
+- **适配项目集插件**
+- **主题登录认证界面重构**，引入动画角色交互面板
+- template + JS 的 **CDN 正文图片方案**，优化图片处理默认值
+
+### 修复
+
+- 统一标题 UI 提交导致分类/标签页布局异常
+- 图片自定义格式失效、正文图片双重加载与空跑问题
+- 分享海报摘要读取 Halo 后台数据，不再依赖摘要框开关
+- 个人简介跳转 /login 瞬间样式散架、友链随机访问自定义分组失效（改回 DOM 方案），新增随机访问与随机钓鱼跳转动效
+- meta description 标签缺失 `th:` 前缀
+
+### 优化
+
+- 移除卡片 3D 倾斜功能，优化作品集/装备库页面
+- 图片处理扩展、外部字体非阻塞加载、JS 打包优化
+- 统一各页面标题 UI 与间距样式
+
+### 其它
+
+- 版本号提升至 1.0.4
+- README 更新预览表格、组件列表、页面支持及项目结构
+
+## [v1.0.1] - 2026-07-23
+
+### 新增
+
+- 🎉 初始提交：Ethereal Halo 主题首发（基于 Fuwari 二次开发的 Halo 增强型主题），包含首页、文章、分类、标签、归档、友链、朋友圈等页面及基础设置项
+
+### 修复
+
+- 朋友圈部分文章溢出卡片
+- Halo 徽章分支名 master → main
+
+### 其它
+
+- 版本号提升至 1.0.1，更新 README
+
+---
+
+[Unreleased]: https://github.com/AloneNanNan/halo-theme-ethereal/compare/v1.2.0...HEAD
+[v1.1.2]: https://github.com/AloneNanNan/halo-theme-ethereal/compare/v1.1.1...v1.1.2
+[v1.1.1]: https://github.com/AloneNanNan/halo-theme-ethereal/compare/v1.1.0...v1.1.1
+[v1.1.0]: https://github.com/AloneNanNan/halo-theme-ethereal/compare/ae09a21...35707ae
+[v1.0.8]: https://github.com/AloneNanNan/halo-theme-ethereal/compare/9231bb5...ae09a21
+[v1.0.7]: https://github.com/AloneNanNan/halo-theme-ethereal/compare/0b61402...9231bb5
+[v1.0.6]: https://github.com/AloneNanNan/halo-theme-ethereal/compare/80ff959...0b61402
+[v1.0.5.1]: https://github.com/AloneNanNan/halo-theme-ethereal/compare/3c815fc...80ff959
+[v1.0.4]: https://github.com/AloneNanNan/halo-theme-ethereal/compare/4db643c...3c815fc
+[v1.0.1]: https://github.com/AloneNanNan/halo-theme-ethereal/compare/71f837e...4db643c

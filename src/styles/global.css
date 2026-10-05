@@ -1,0 +1,53 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+@plugin "@tailwindcss/typography";
+@plugin "@iconify/tailwind4";
+
+/* 显式把 settings.yaml 纳入 Tailwind 扫描范围：
+   设置项里出现的图标类名（默认值、帮助文本中给用户挑选的候选图标）只存在于
+   yaml，不会被扫描 .astro 时的常规扫描覆盖，声明 @source 兜住。
+   注意：这只是「兜底」，像 projects/highlights 的 icon 这类真正会被用户手填的
+   候选集另有下面的 @source inline 显式登记。 */
+@source "../../settings.yaml";
+
+/* 「关于我」页面剩余的三组图标白名单，全部由**用户在主题设置里手填**或由
+   extend-pages.js 在**运行时**写进 DOM，源码里不出现完整字面量，必须登记：
+   1) 项目 / 更新摘要卡左侧的图标方块（settings.yaml 的 projects/highlights.icon）
+   2) 服务器状态四行的图标（由 extend-pages.js 的 stubRows 生成，与数据源的
+      key 一一对应：cpu / mem / disk / system）
+   3) 各卡片通用的「外链箭头」icon-[material-symbols--arrow-outward-rounded]
+   同样：类名必须是完整字面量，空格分隔。
+   （原「保持联系」textarea 的那组品牌图标已随该字段一并移除 —— 现在社交图标
+   走「个人简介小组件」的 iconify SVG 值，不再需要 CSS 类名。） */
+@source inline("icon-[material-symbols--auto-awesome-rounded] icon-[material-symbols--history-rounded] icon-[material-symbols--edit-note-rounded] icon-[material-symbols--menu-book-rounded] icon-[material-symbols--terminal-rounded] icon-[material-symbols--database] icon-[material-symbols--memory-rounded] icon-[material-symbols--memory-alt-rounded] icon-[material-symbols--arrow-outward-rounded] icon-[material-symbols--dns] icon-[material-symbols--swap-vert-rounded] icon-[material-symbols--speed-rounded] icon-[material-symbols--device-thermostat] icon-[material-symbols--swap-horiz-rounded] icon-[material-symbols--schedule-rounded]");
+
+@utility is-home {
+  &.enable-banner #banner-wrapper {
+    @apply h-(--banner-height-home) translate-y-(--banner-height-extend);
+  }
+
+  &.enable-banner #banner,
+  &.enable-banner #banner-mobile {
+    @apply h-(--banner-height-home) translate-y-0;
+  }
+
+  &.enable-banner #main-grid {
+    @apply translate-y-(--banner-height-extend);
+  }
+
+  /* 首页瞬间栏：与 #main-grid 同条件随 banner 下推，
+     否则瞬间条与文章卡片之间会出现整段空白（横幅/全屏模式）。
+     移植自上游 global.css（原 moment-marquee-anchor 规则，
+     1.2.0-mod 初版漏带，导致全屏壁纸模式下瞬间条位置错乱） */
+  &.enable-banner .moment-marquee-anchor {
+    @apply translate-y-(--banner-height-extend);
+  }
+
+  &.enable-banner #sidebar-sticky {
+    @apply top-[calc(1rem-var(--banner-height-extend))];
+  }
+
+  &.enable-banner #right-sidebar-sticky {
+    @apply top-[calc(1rem-var(--banner-height-extend))];
+  }
+}

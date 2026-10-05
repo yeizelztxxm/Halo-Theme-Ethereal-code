@@ -5,13 +5,13 @@ metadata:
 spec:
   displayName: Ethereal
   author:
-    name: 楠南NanNan
+    name: 楠南NanNan And yeizelztx_m
     website: https://www.nannax.top
   description: 一款基于 Fuwari 二次开发，为 Halo 打造的 Fuwari 风格增强型主题。
   logo: /themes/Ethereal/assets/images/favicon-light-192.png
-  homepage: https://github.com/AloneNanNan/halo-theme-ethereal#readme
-  repo: https://github.com/AloneNanNan/halo-theme-ethereal
-  issues: https://github.com/AloneNanNan/halo-theme-ethereal/issues
+  homepage: https://github.com/yeizelztxxm/halo-theme-ethereal-code#readme
+  repo: https://github.com/yeizelztxxm/halo-theme-ethereal-code
+  issues: https://github.com/yeizelztxxm/halo-theme-ethereal-code/issues
   customTemplates:
     page:
       # ⚠️ 1.4.92 补：主题设置的「关于我页面」「博客更新日志页面」帮助文字都要求
@@ -43,8 +43,8 @@ spec:
         file: "statistics.html"
   settingName: "Ethereal-setting"
   configMapName: "Ethereal-configMap"
-  version: "1.5.55"
+  version: "1.6.0"
   requires: ">=2.25.0"
   license:
     - name: "MIT"
-      url: "https://github.com/AloneNanNan/halo-theme-ethereal/blob/main/LICENSE"
+      url: "https://github.com/yeizelztxxm/halo-theme-ethereal-code/blob/main/LICENSE"
